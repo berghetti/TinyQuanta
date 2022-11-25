@@ -15,7 +15,7 @@
 #include <iostream>
 #include <queue>
 #include <boost/coroutine2/all.hpp>
-#include <boost/bind.hpp>
+#include <boost/bind/bind.hpp>
 #include <boost/context/stack_context.hpp>
 #include "rocksdb/c.h"
 #include "ci_lib.h"
@@ -534,10 +534,10 @@ void* worker(void* arg) {
 
     for(int coro_id = 0; coro_id < NUM_WORKER_COROS; coro_id++) {
     	#ifdef STACKS_FROM_HUGEPAGE
-    	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(stack_pool), boost::bind(coro, coro_id, &job_infos[coro_id], _1));
+    	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(stack_pool), boost::bind(coro, coro_id, &job_infos[coro_id], boost::placeholders::_1));
     	stack_pool += STACK_SIZE;
     	#else
-    	worker_coros[coro_id] = coro_t::pull_type(boost::bind(coro, coro_id, &job_infos[coro_id], _1));
+    	worker_coros[coro_id] = coro_t::pull_type(boost::bind(coro, coro_id, &job_infos[coro_id], boost::placeholders::_1));
     	#endif
     	worker_coro_infos[coro_id].coro = &worker_coros[coro_id];
     	worker_coro_infos[coro_id].yield = static_cast<coro_t::push_type*>(worker_coros[coro_id].get()); 

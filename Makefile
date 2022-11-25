@@ -23,15 +23,15 @@ CFLAGS += -I /usr/include
 BOOST_LDFLAGS += -lboost_coroutine -lboost_context
 
 # for RocksDB
-CFLAGS += -I /home/zhihong/profile_rocksdb/rocksdb/include
+CFLAGS += -I /home/zhihong/RocksDB-TQ/include
 ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie
-ROCKSDB_LIB = /home/zhihong/profile_rocksdb/rocksdb/test_llvm/librocksdb_cp.a
+ROCKSDB_LIB = /home/zhihong/RocksDB-TQ/test_llvm/librocksdb_cp.a
 
 # for CP
-CI_LIB_HOME = /home/zhihong/CompilerInterrupts
-CFLAGS += -I$(CI_LIB_HOME)/src
-CFLAGS += -Wl,-rpath=$(CI_LIB_HOME)/lib
-CP_LDFLAGS += -L$(CI_LIB_HOME)/lib -lci
+CP_LIB_HOME = /home/zhihong/CheapPreemptions
+CFLAGS += -I$(CP_LIB_HOME)/src
+CFLAGS += -Wl,-rpath=$(CP_LIB_HOME)/lib
+CP_LDFLAGS += -L$(CP_LIB_HOME)/lib -lci
 CP_LDFLAGS += -Wl,--wrap=pthread_mutex_lock
 
 #OPT = -O2 -fno-omit-frame-pointer -momit-leaf-frame-pointer
