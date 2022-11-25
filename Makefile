@@ -3,7 +3,7 @@ CC = gcc
 ifeq ($(DEBUG),y)
 CFLAGS += -D__DEBUG__ -O0 -g -ggdb
 else
-CFLAGS += -O3 -g -DQUANTUM_CYCLE=3000 #-DTIME_STAGE #-DNDEBUG
+CFLAGS += -O3 -g -DQUANTUM_CYCLE=3000 -DBASE_CPU=28 #-DTIME_STAGE #-DNDEBUG
 endif
 
 PKGCONF ?= pkg-config
