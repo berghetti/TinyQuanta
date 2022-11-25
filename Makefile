@@ -36,7 +36,7 @@ CP_LDFLAGS += -Wl,--wrap=pthread_mutex_lock
 
 #OPT = -O2 -fno-omit-frame-pointer -momit-leaf-frame-pointer
 
-all: tq_server tq_server_loop_yield tq_server_empty tq_server_las
+all: tq_server tq_server_loop_yield tq_server_empty tq_server_las create_db
 
 tq_server: tq_server.cpp Makefile $(PC_FILE)
 	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
