@@ -25,6 +25,10 @@
 #define FULL_MASK 0xFFFFFFFF
 #define EMPTY_MASK 0x0
 
+#ifndef BASE_CPU
+#define BASE_CPU 0
+#endif
+
 /* offload checksum calculations */
 // static const struct rte_eth_conf port_conf_default = {
 // 	.rxmode = {
@@ -265,6 +269,7 @@ static void populate_packet(struct rte_mbuf *buf, uint32_t seq_num, uint16_t jty
 static void pin_to_cpu(int cpu_id) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
+	cpu_id = cpu_id + BASE_CPU;
         CPU_SET(cpu_id, &cpuset);
         pthread_t thread = pthread_self();
         int ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
