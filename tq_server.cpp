@@ -15,7 +15,7 @@
 #include <iostream>
 #include <queue>
 #include <boost/coroutine2/all.hpp>
-#include <boost/bind/bind.hpp>
+#include <boost/bind.hpp>
 #include <boost/context/stack_context.hpp>
 #include "rocksdb/c.h"
 #include "ci_lib.h"
@@ -58,6 +58,10 @@
 #define MAKE_IP_ADDR(a, b, c, d)			\
 	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
 	 ((uint32_t) c << 8) | (uint32_t) d)
+
+#ifndef BASE_CPU
+#define BASE_CPU 0
+#endif
 
 typedef struct worker_arg {
 	struct rte_ring* rx_mbuf_dispatch_q;
@@ -306,6 +310,7 @@ static bool check_ip_hdr(const struct rte_mbuf *buf)
 static void pin_to_cpu(int cpu_id) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
+	cpu_id = cpu_id + BASE_CPU;
         CPU_SET(cpu_id, &cpuset);
         pthread_t thread = pthread_self();
         int ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
@@ -534,10 +539,10 @@ void* worker(void* arg) {
 
     for(int coro_id = 0; coro_id < NUM_WORKER_COROS; coro_id++) {
     	#ifdef STACKS_FROM_HUGEPAGE
-    	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(stack_pool), boost::bind(coro, coro_id, &job_infos[coro_id], boost::placeholders::_1));
+    	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(stack_pool), boost::bind(coro, coro_id, &job_infos[coro_id], _1));
     	stack_pool += STACK_SIZE;
     	#else
-    	worker_coros[coro_id] = coro_t::pull_type(boost::bind(coro, coro_id, &job_infos[coro_id], boost::placeholders::_1));
+    	worker_coros[coro_id] = coro_t::pull_type(boost::bind(coro, coro_id, &job_infos[coro_id], _1));
     	#endif
     	worker_coro_infos[coro_id].coro = &worker_coros[coro_id];
     	worker_coro_infos[coro_id].yield = static_cast<coro_t::push_type*>(worker_coros[coro_id].get()); 
