@@ -51,7 +51,7 @@ tq_server_las: tq_server.cpp Makefile $(PC_FILE)
 	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DLAS $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_client: tq_client.cpp Makefile $(PC_FILE)
-	$(CXX) $< $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
+	$(CXX) $< -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
 
 create_db: create_db.c
 	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
