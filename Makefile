@@ -36,7 +36,7 @@ CP_LDFLAGS += -Wl,--wrap=pthread_mutex_lock
 
 #OPT = -O2 -fno-omit-frame-pointer -momit-leaf-frame-pointer
 
-all: tq_server tq_server_loop_yield tq_server_empty tq_server_las tq_client create_db
+all: tq_server tq_server_loop_yield tq_server_empty tq_server_las tq_client create_db profile_rocksdb_get
 
 tq_server: tq_server.cpp Makefile $(PC_FILE)
 	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
@@ -54,6 +54,9 @@ tq_client: tq_client.cpp Makefile $(PC_FILE)
 	$(CXX) $< -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
 
 create_db: create_db.c
+	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
+
+profile_rocksdb_get: profile_rocksdb_get.c
 	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
 
 clean:
