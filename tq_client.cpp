@@ -339,6 +339,7 @@ static void* client_rx(void* arg)
 
 		}
 	}
+	return nullptr;
 }
 
 static uint64_t rdtsc_w_lfence(){
