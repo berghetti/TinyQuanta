@@ -514,7 +514,7 @@ main(int argc, char *argv[])
 		return 0;
 
 	if (port_init(dpdk_port, rx_mbuf_pool, num_queues) != 0)
-		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8 "\n", dpdk_port);
+		rte_exit(EXIT_FAILURE, "Cannot init port %d\n", dpdk_port);
 
 	pthread_t rx_tid;
 	pthread_create(&rx_tid, nullptr, *client_rx, nullptr);

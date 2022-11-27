@@ -1096,7 +1096,7 @@ int main(int argc, char *argv[])
 
 	/* initialize port */
 	if (port_init(dpdk_port, rx_mbuf_pool, num_rx_queues, num_tx_queues) != 0)
-		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8 "\n", dpdk_port);
+		rte_exit(EXIT_FAILURE, "Cannot init port %d\n", dpdk_port);
 
 	rocksdb_init();
 	run_server();
