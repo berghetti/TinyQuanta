@@ -116,7 +116,7 @@ typedef struct coro_info
 	job_info_t *jinfo;
 	struct rte_mbuf *rx_mbuf;
 	struct rte_mbuf *tx_mbuf;
-	int num_quanta;
+	uint32_t num_quanta;
 	uint64_t execution_time;
 	coro_info(): coro(nullptr), yield(nullptr), jinfo(nullptr), rx_mbuf(nullptr), tx_mbuf(nullptr), num_quanta(0), execution_time(0) {}
 	#ifdef LAS
@@ -177,6 +177,11 @@ __thread uint64_t time_interval = 0;
 __thread uint64_t get_start_time, get_end_time; 
 
 __thread coro_t::push_type *curr_yield;
+
+#ifdef LAS
+__thread uint32_t quantum_idx = 0;
+__thread uint32_t num_assigned_quanta = 1;
+#endif
 
 #ifdef STACKS_FROM_HUGEPAGE
 char* stacks;
@@ -334,7 +339,13 @@ void call_the_yield(long ic) {
 		#ifdef TIME_STAGE
 		time_interval = ic;
 		#endif
+		#ifdef LAS
+		quantum_idx++;
+		if(quantum_idx == num_assigned_quanta)
+			(*curr_yield)(nullptr);
+		#else
         (*curr_yield)(nullptr);
+        #endif
 }
 
 void empty_handler(long ic) {
@@ -571,6 +582,9 @@ void* worker(void* arg) {
 			#ifdef LAS
 			coro_info_t* next_coro = busy_coros.top();
 			busy_coros.pop();
+			num_assigned_quanta = busy_coros.top()->num_quanta - next_coro->num_quanta + 1; 
+			num_assigned_quanta = (num_assigned_quanta + dispatch_index <= DISPATCH_RING_DEQUEUE_PERIOD)? num_assigned_quanta : DISPATCH_RING_DEQUEUE_PERIOD - dispatch_index;
+			quantum_idx = 0;
 			#else
 			coro_info_t* next_coro = busy_coros.front();
 			busy_coros.pop_front();
@@ -616,7 +630,11 @@ void* worker(void* arg) {
 		    	break;
 		    	#endif
 		    }
+		    #ifdef LAS
+		    dispatch_index += num_assigned_quanta; 
+		    #else
 		    dispatch_index++;
+		    #endif
 		    #ifdef LOOP_YIELD
 			}
 			#endif
