@@ -1,4 +1,5 @@
 CC = gcc
+LLVM_CXX = clang++-12
 
 ifeq ($(DEBUG),y)
 CFLAGS += -D__DEBUG__ -O0 -g -ggdb
@@ -26,6 +27,7 @@ BOOST_LDFLAGS += -lboost_coroutine -lboost_context
 CFLAGS += -I /home/zhihong/RocksDB-TQ/include
 ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie
 ROCKSDB_LIB = /home/zhihong/RocksDB-TQ/test_llvm/librocksdb_cp.a
+ROCKSDB_LIB_UNINST = /home/zhihong/RocksDB-TQ/test_llvm/librocksdb.a
 
 # for CP
 CP_LIB_HOME = /home/zhihong/CheapPreemptions
@@ -39,25 +41,25 @@ CP_LDFLAGS += -Wl,--wrap=pthread_mutex_lock
 all: tq_server tq_server_loop_yield tq_server_empty tq_server_las tq_client create_db profile_rocksdb_get
 
 tq_server: tq_server.cpp Makefile $(PC_FILE)
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_server_loop_yield: tq_server.cpp Makefile $(PC_FILE)
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DLOOP_YIELD $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DLOOP_YIELD $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_server_empty: tq_server.cpp Makefile $(PC_FILE)
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DUSE_EMPTY_HANDLER $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DUSE_EMPTY_HANDLER $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_server_las: tq_server.cpp Makefile $(PC_FILE)
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DLAS $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) -DLAS $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_client: tq_client.cpp Makefile $(PC_FILE)
-	$(CXX) $< -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
+	$(LLVM_CXX) $< -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
 
 create_db: create_db.c
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
 
 profile_rocksdb_get: profile_rocksdb_get.c
-	$(CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
+	$(LLVM_CXX) $< $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
 
 clean:
-	rm -f tq_server tq_server_empty tq_server_las tq_client create_db
+	rm -f tq_server tq_server_empty tq_server_las tq_client create_db profile_rocksdb_get
