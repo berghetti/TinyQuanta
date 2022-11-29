@@ -37,13 +37,15 @@
 #define RETURN_RING_BURST_SIZE 8
 #define RETURN_RING_CHECKIN_PERIOD (RETURN_RING_BURST_SIZE * NUM_WORKER_THREADS * 2)
 #define FREE_MBUF_MAX_BATCH_SIZE (RETURN_RING_SIZE * 2)
-// MAX_RUNNING_JOBS should be smaller than RX_RING_SIZE
-#define MAX_RUNNING_JOBS 512
+#define MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN 128
+#define MAX_RUNNING_JOBS_TO_CHECKIN (NUM_WORKER_THREADS * MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN)
 
 #define RX_MBUF_POOL_SIZE 8191
 #define RX_MBUF_CACHE_SIZE 250
 #define TX_MBUF_POOL_SIZE 8191
 #define TX_MBUF_CACHE_SIZE 250
+#define MAX_NUM_RX_MBUF_PER_THREAD (DISPATCH_RING_SIZE + NUM_WORKER_COROS + RETURN_RING_BURST_SIZE)
+#define MAX_NUM_TX_MBUF_PER_THREAD (NUM_WORKER_COROS + TX_QUEUE_BURST_SIZE)
 
 #define STACK_SIZE (128 * 1024)
 #define HUGE_PAGE_SIZE (1 << 30)
@@ -97,15 +99,13 @@ bool worker_info_ptr_cmp(const worker_info_t* ptr1, const worker_info_t* ptr2) {
 typedef boost::coroutines2::coroutine<void*>   coro_t;
 // job type
 typedef enum job_type {
-    ROCKSDB_GET,
-    ROCKSDB_PUT,
-    ROCKSDB_SCAN,
-    NUM_JOB_TYPES
+    ROCKSDB_GET = 0xA,
+    ROCKSDB_SCAN 
 } job_type_t;
 // job info passed to worker coroutine
 typedef struct job_info {
     job_type_t jtype;
-    char* input_data;
+    uint32_t key;
     char* output_data;
 } job_info_t;
 
@@ -125,6 +125,13 @@ typedef struct coro_info
     }
     #endif
 } coro_info_t;
+
+struct rte_rocksdb_hdr {
+        uint32_t id;
+        uint32_t req_type;
+        uint32_t req_size;
+        uint32_t run_ns;
+};
 
 #ifdef LAS
 bool coro_info_ptr_cmp(const coro_info_t* ptr1, const coro_info_t* ptr2) {
@@ -164,8 +171,6 @@ static struct rte_ether_addr my_eth;
 static uint32_t my_ip;
 
 /* parameters */
-static size_t payload_len = 22; /* total packet size of 64 bytes */
-static unsigned int client_port = 50000;
 static unsigned int server_port = 8001;
 static unsigned int num_rx_queues = 1;
 static unsigned int num_tx_queues = NUM_WORKER_THREADS;
@@ -362,6 +367,8 @@ void coro(int coro_id, job_info_t* &jinfo, coro_t::push_type &yield)
     char *err = nullptr;
     size_t vallen;
     rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
+    char key[10];
+    char val[10];
 
     for(;;) {
     	assert(jinfo->jtype == ROCKSDB_GET);
@@ -371,11 +378,11 @@ void coro(int coro_id, job_info_t* &jinfo, coro_t::push_type &yield)
         // rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
         
         // char *returned_value = rocksdb_get(db, readoptions, jinfo->input_data, strlen(jinfo->input_data), &vallen, &err);
-        rocksdb_get_in_place(db, readoptions, jinfo->input_data, strlen(jinfo->input_data), jinfo->output_data, &vallen, &err);
+        snprintf(key, 10, "key%d", jinfo->key);
+	rocksdb_get_in_place(db, readoptions, key, strlen(key), val, &vallen, &err);
         assert(!err);
-        assert(strcmp(jinfo->output_data, "value") == 0);
+        assert(strcmp(val, "value") == 0);
         // memcpy((char*)jinfo->output_data, returned_value, vallen);
-        memset(jinfo->output_data + vallen, 0xAB, payload_len - vallen - sizeof(uint32_t));
     	// assert(strcmp(returned_value, "value") == 0);
     	// free(returned_value);
 
@@ -401,9 +408,9 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	uint64_t start_time = rdtsc_w_lfence();
 	#endif
 
-	struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
+	/*struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
 	assert(tx_mbuf!= nullptr);
-	idle_coro->tx_mbuf = tx_mbuf;
+	idle_coro->tx_mbuf = tx_mbuf;*/
 	idle_coro->rx_mbuf = rx_mbuf;
 	idle_coro->num_quanta = 0; 
 
@@ -412,15 +419,25 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	struct rte_ipv4_hdr * rx_ptr_ipv4_hdr = rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_ipv4_hdr *, RTE_ETHER_HDR_LEN);
 	struct rte_udp_hdr *rx_ptr_udp_hdr = rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_udp_hdr *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
 	// TODO: fix this
-	uint32_t *seq_num = rte_pktmbuf_mtod_offset(rx_mbuf, uint32_t *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
+	/*uint32_t *seq_num = rte_pktmbuf_mtod_offset(rx_mbuf, uint32_t *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
 	uint16_t *jtype = rte_pktmbuf_mtod_offset(rx_mbuf, uint16_t *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(uint32_t) );
 	idle_coro->jinfo->jtype = static_cast<job_type>(*jtype);
-	idle_coro->jinfo->input_data = rte_pktmbuf_mtod_offset(rx_mbuf, char *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(uint32_t) + sizeof(uint16_t));
-	/* headers of tx_mbuf */
+	idle_coro->jinfo->input_data = rte_pktmbuf_mtod_offset(rx_mbuf, char *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(uint32_t) + sizeof(uint16_t));*/
+	struct rte_rocksdb_hdr *rx_ptr_rocksdb_hdr = rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_rocksdb_hdr *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
+	idle_coro->jinfo->jtype = static_cast<job_type>(rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_type));
+	idle_coro->jinfo->key = rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_size);
+
+	/* headers of tx_mbuf */	
+	//struct rte_mbuf *tx_mbuf = rte_pktmbuf_copy(rx_mbuf, tx_mbuf_pool, 0, UINT32_MAX);
+	struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
+        assert(tx_mbuf!= nullptr);
+	idle_coro->tx_mbuf = tx_mbuf;
+
 	char *buf_ptr;
 	struct rte_ether_hdr *eth_hdr;
 	struct rte_ipv4_hdr *ipv4_hdr;
 	struct rte_udp_hdr *rte_udp_hdr;
+	struct rte_rocksdb_hdr *rte_rocksdb_hdr;
 
 	/* ethernet header */
 	buf_ptr = rte_pktmbuf_append(tx_mbuf, RTE_ETHER_HDR_LEN);
@@ -435,30 +452,35 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	ipv4_hdr = (struct rte_ipv4_hdr *) buf_ptr;
 	ipv4_hdr->version_ihl = 0x45;
 	ipv4_hdr->type_of_service = 0;
-	ipv4_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + payload_len);
-	ipv4_hdr->packet_id = 0;
-	ipv4_hdr->fragment_offset = 0;
+	ipv4_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(struct rte_rocksdb_hdr));
+	ipv4_hdr->packet_id = rx_ptr_ipv4_hdr->packet_id;
+	ipv4_hdr->fragment_offset = rx_ptr_ipv4_hdr->fragment_offset;
 	ipv4_hdr->time_to_live = 64;
 	ipv4_hdr->next_proto_id = IPPROTO_UDP;
-	ipv4_hdr->hdr_checksum = 0;
+	ipv4_hdr->hdr_checksum = rx_ptr_ipv4_hdr->hdr_checksum;
 	ipv4_hdr->src_addr = rte_cpu_to_be_32(my_ip);
 	ipv4_hdr->dst_addr = rx_ptr_ipv4_hdr->src_addr;
 
-	/* UDP header + fake data */
-	buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_udp_hdr) + payload_len);
+	/* UDP header */
+	buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_udp_hdr));
 	rte_udp_hdr = (struct rte_udp_hdr *) buf_ptr;
 	rte_udp_hdr->src_port = rte_cpu_to_be_16(server_port);
 	rte_udp_hdr->dst_port = rx_ptr_udp_hdr->src_port;
-	rte_udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) + payload_len);
+	rte_udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) + sizeof(struct rte_rocksdb_hdr));
 	rte_udp_hdr->dgram_cksum = 0;
-	// TODO: fix this
-	*(uint32_t*)((char*)buf_ptr + sizeof(struct rte_udp_hdr)) = *seq_num;
-	idle_coro->jinfo->output_data = buf_ptr + sizeof(struct rte_udp_hdr) + sizeof(uint32_t);
-//	memset(buf_ptr + sizeof(struct rte_udp_hdr), 0xAB, payload_len);
+	/* RocksDB header */
+	buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_rocksdb_hdr));
+        rte_rocksdb_hdr = (struct rte_rocksdb_hdr *) buf_ptr;	
+	rte_rocksdb_hdr->id = rx_ptr_rocksdb_hdr->id;
+	rte_rocksdb_hdr->req_type = rx_ptr_rocksdb_hdr->req_type;
+	rte_rocksdb_hdr->req_size = rx_ptr_rocksdb_hdr->req_size;
+	rte_rocksdb_hdr->run_ns = 0;
+	//*(uint32_t*)((char*)buf_ptr + sizeof(struct rte_udp_hdr)) = *seq_num;
+	//idle_coro->jinfo->output_data = buf_ptr + sizeof(struct rte_udp_hdr) + sizeof(uint32_t);
 
-// 	tx_mbuf->l2_len = RTE_ETHER_HDR_LEN;
-// 	tx_mbuf->l3_len = sizeof(struct rte_ipv4_hdr);
-// 	tx_mbuf->ol_flags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
+	//tx_mbuf->l2_len = RTE_ETHER_HDR_LEN;
+	//tx_mbuf->l3_len = sizeof(struct rte_ipv4_hdr);
+	//tx_mbuf->ol_flags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
 
 	#ifdef TIME_STAGE
 	uint64_t end_time = rdtsc_w_lfence();
@@ -812,39 +834,30 @@ static int run_server()
 	uint16_t return_queue_checkin_idx = 0;
 	worker_info_t* tmp_w;
 	int cur_version_number = 0;
-	int num_received_jobs = 0;
+	//int num_received_jobs = 0;
 	bool force_pull_return; 
 	int total_running_jobs = 0;
 
-	// uint32_t total_nb_rx = 0, times = 0;
-
 	/* Run until the application is quit or killed. */
 	for (;;) {
+		/* if there were packets buffered, handle them first before starting to receive again */
 		/* receive packets */
 		nb_rx = rte_eth_rx_burst(port, 0, rx_bufs, RX_QUEUE_BURST_SIZE);
-
+			
 		if (nb_rx == 0)
 			continue;
 
-		// total_nb_rx += nb_rx;
-		// times += 1;
-
-		// std::cout << "Receive packets: " << nb_rx << std::endl;
-
 		force_pull_return = false;
-
 		for(i = 0; i < nb_rx; i++) {
 			tmp_w = worker_queue.top();
 			worker_queue.pop();
-			if(rte_ring_enqueue(tmp_w->rx_mbuf_dispatch_q, rx_bufs[i]) < 0) {
-				// printf("error: worker %d's dispatch queue is full\n", tmp_w->wid);
-				if(!debug_mode) {
-					std::cout << "Debug mode is on!" << std::endl;
-					debug_mode = true;
-				}
-				// TODO drop it for now
+			if(unlikely(rte_ring_enqueue(tmp_w->rx_mbuf_dispatch_q, rx_bufs[i]) < 0)) {
+				// drop this packet
+				// dispatcher may have stale information about the number of jobs each worker has, hence force a return pull
 				rte_pktmbuf_free(rx_bufs[i]);
-				worker_queue.push(tmp_w); 
+				force_pull_return = true;
+				worker_queue.push(tmp_w);
+				std::cout << "Packet drop: total number of running jobs " << total_running_jobs << std::endl;
 				continue;
 			} 
 			tmp_w->num_running_jobs++;
@@ -853,14 +866,8 @@ static int run_server()
 			total_running_jobs++;
 		}
 
-		// if(times >= 100000) {
-		// 	std::cout << total_nb_rx/times << std::endl;
-		// 	times = 0;
-		// 	total_nb_rx = 0;
-		// }
-
 		// check in
-		if(return_queue_checkin_idx >= RETURN_RING_CHECKIN_PERIOD || total_running_jobs >= MAX_RUNNING_JOBS) {
+		if(return_queue_checkin_idx >= RETURN_RING_CHECKIN_PERIOD || total_running_jobs >= MAX_RUNNING_JOBS_TO_CHECKIN || force_pull_return ) {
 			total_return_size = 0;
 			for(i = 0; i < NUM_WORKER_THREADS; i++) {
 				tmp_w = worker_queue.top();
@@ -868,6 +875,7 @@ static int run_server()
 				assert(tmp_w->version_number == cur_version_number);
 				return_size = 0;
 				for(;;) {
+					// drain the return queue
 					nb_return = rte_ring_dequeue_burst(tmp_w->rx_mbuf_return_q, (void **)&return_rx_bufs[total_return_size], RETURN_RING_BURST_SIZE, nullptr);
 					return_size += nb_return;
 					total_return_size += nb_return;
@@ -885,16 +893,14 @@ static int run_server()
 			cur_version_number++;
 			total_running_jobs -= total_return_size;
 		}
-		num_received_jobs += nb_rx;
-		// if(num_received_jobs > 10000)
-		// 	break;
+		/*num_received_jobs += nb_rx;
 		if(num_received_jobs > 20000000) {
     		std::cout << "Terminated!" << std::endl;
     		#ifdef STACKS_FROM_HUGEPAGE
     		deallocate_stacks(stacks);
     		#endif
     		abort();
-    	}
+    		}*/
 	}
 
 	return 0;
@@ -1070,11 +1076,19 @@ static int parse_args(int argc, char *argv[])
 	return 0;
 }
 
+/* perform basic sanity check of the settings */
+void sanity_check()
+{	
+	assert(RX_MBUF_POOL_SIZE > NUM_WORKER_THREADS * MAX_NUM_RX_MBUF_PER_THREAD);
+	assert(TX_MBUF_POOL_SIZE > NUM_WORKER_THREADS * MAX_NUM_TX_MBUF_PER_THREAD);
+}
 /*
  * The main function, which does initialization and starts the client or server.
  */
 int main(int argc, char *argv[])
 {
+	sanity_check();
+
 	int args_parsed, res;
 
 	#ifdef STACKS_FROM_HUGEPAGE
