@@ -22,28 +22,29 @@
 #include <string>
 #include <sys/mman.h> // mmap, munmap
 
-#define NUM_WORKER_THREADS 4
+#define NUM_WORKER_THREADS 16
 #define NUM_WORKER_COROS 4
 
+// shared among cores
 #define RX_RING_SIZE 1024
 #define RX_QUEUE_BURST_SIZE 32
+#define RX_MBUF_POOL_SIZE 32767
+#define RX_MBUF_CACHE_SIZE 250
+#define TX_MBUF_POOL_SIZE 8191
+#define TX_MBUF_CACHE_SIZE 250
+
+// per-core states
 #define TX_RING_SIZE 128
 #define TX_QUEUE_BURST_SIZE 4
-
 #define DISPATCH_RING_SIZE 256
 #define DISPATCH_RING_BURST_SIZE 4
 #define DISPATCH_RING_DEQUEUE_PERIOD 8
 #define RETURN_RING_SIZE 512
 #define RETURN_RING_BURST_SIZE 8
 #define RETURN_RING_CHECKIN_PERIOD (RETURN_RING_BURST_SIZE * NUM_WORKER_THREADS * 2)
-#define FREE_MBUF_MAX_BATCH_SIZE (RETURN_RING_SIZE * 2)
+#define FREE_MBUF_MAX_BATCH_SIZE (RETURN_RING_SIZE * NUM_WORKER_THREADS)
 #define MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN 128
 #define MAX_RUNNING_JOBS_TO_CHECKIN (NUM_WORKER_THREADS * MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN)
-
-#define RX_MBUF_POOL_SIZE 8191
-#define RX_MBUF_CACHE_SIZE 250
-#define TX_MBUF_POOL_SIZE 8191
-#define TX_MBUF_CACHE_SIZE 250
 #define MAX_NUM_RX_MBUF_PER_THREAD (DISPATCH_RING_SIZE + NUM_WORKER_COROS + RETURN_RING_BURST_SIZE)
 #define MAX_NUM_TX_MBUF_PER_THREAD (NUM_WORKER_COROS + TX_QUEUE_BURST_SIZE)
 
@@ -54,8 +55,6 @@
 #ifndef QUANTUM_CYCLE
 #define QUANTUM_CYCLE 1000
 #endif
-
-#define MAP_HUGE_1GB    (30 << MAP_HUGE_SHIFT)
 
 #define MAKE_IP_ADDR(a, b, c, d)			\
 	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
@@ -408,6 +407,7 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	uint64_t start_time = rdtsc_w_lfence();
 	#endif
 
+	//printf("Packet processed!\n");
 	/*struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
 	assert(tx_mbuf!= nullptr);
 	idle_coro->tx_mbuf = tx_mbuf;*/
@@ -491,28 +491,48 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 
 static int rocksdb_init() 
 {
-	rocksdb_options_t *options = rocksdb_options_create();
+    rocksdb_options_t *options = rocksdb_options_create();
     rocksdb_options_set_allow_mmap_reads(options, 1);
     rocksdb_options_set_allow_mmap_writes(options, 1);
-    //rocksdb_slicetransform_t * prefix_extractor = rocksdb_slicetransform_create_fixed_prefix(8);
-    //rocksdb_options_set_prefix_extractor(options, prefix_extractor);
-    //rocksdb_options_set_plain_table_factory(options, 0, 10, 0.75, 3);
+    rocksdb_slicetransform_t * prefix_extractor = rocksdb_slicetransform_create_capped_prefix(8);
+    rocksdb_options_set_prefix_extractor(options, prefix_extractor);
+    rocksdb_options_set_plain_table_factory(options, 0, 10, 0.75, 3);
     // Optimize RocksDB. This is the easiest way to
     // get RocksDB to perform well
     rocksdb_options_increase_parallelism(options, 0);
     rocksdb_options_optimize_level_style_compaction(options, 0);
     // create the DB if it's not already present
     rocksdb_options_set_create_if_missing(options, 1);
-
+    // overwrite the default 8MB block cache to support higher concurrency
+    //rocksdb_block_based_table_options_t* block_options = rocksdb_block_based_options_create();
+    
+    //rocksdb_block_based_options_set_block_cache(block_options, rocksdb_cache_create_lru_shard(32 << 20, 8));
+    
+    //rocksdb_options_set_block_based_table_factory(options, block_options);
+    //rocksdb_options_set_table_cache_numshardbits(options, 8);
+    rocksdb_options_set_disable_auto_compactions(options, 1);
+    
     // open DB
     char *err = NULL;
-    char DBPath[] = "./my_db";
+    char DBPath[] = "/tmpfs/experiments/my_db";
     db = rocksdb_open(options, DBPath, &err);
     if (err) {
    	 	printf("Could not open RocksDB database: %s\n", err);
       	return -1;
   	}
-  	return 0;
+    // Put key-value
+  /*rocksdb_writeoptions_t *writeoptions = rocksdb_writeoptions_create();
+  const char *value = "value";
+  for (int i = 0; i < 5000; i++) {
+        char key[10];
+        snprintf(key, 10, "key%d", i);
+        rocksdb_put(db, writeoptions, key, strlen(key), value, strlen(value) + 1,
+                    &err);
+        assert(!err);
+  }
+  assert(!err);
+  rocksdb_writeoptions_destroy(writeoptions);*/
+  return 0;
 }
 
 void* worker(void* arg) {
@@ -765,7 +785,7 @@ static size_t round_to_huge_page_size(size_t n) {
 
 #ifdef STACKS_FROM_HUGEPAGE
 static char* allocate_stacks_from_hugepages() {
-	char *p = static_cast<char *>(mmap(nullptr, round_to_huge_page_size(NUM_WORKER_THREADS * NUM_WORKER_COROS * STACK_SIZE), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB /*| MAP_HUGE_1GB*/, -1, 0));
+	char *p = static_cast<char *>(mmap(nullptr, round_to_huge_page_size(NUM_WORKER_THREADS * NUM_WORKER_COROS * STACK_SIZE), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB , -1, 0));
 	if (p == MAP_FAILED) {
       throw std::bad_alloc();
       abort();
@@ -783,7 +803,7 @@ static void deallocate_stacks(char* stacks) {
  */
 static int run_server()
 {
-	pin_to_cpu(NUM_WORKER_THREADS + 1);
+	pin_to_cpu(0);
 
 	printf("lcore %u running in server mode. [Ctrl+C to quit]\n", rte_lcore_id());
 
@@ -1053,7 +1073,7 @@ static int dpdk_init(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot create rx mbuf pool\n");
 
 	/* Creates a new mempool in memory to hold the mbufs. */
-	tx_mbuf_pool = /*rte_pktmbuf_pool_create*/rte_pktmbuf_pool_create_w_customized_init("MBUF_TX_POOL", TX_MBUF_POOL_SIZE,
+	tx_mbuf_pool = rte_pktmbuf_pool_create_w_customized_init("MBUF_TX_POOL", TX_MBUF_POOL_SIZE,
 		TX_MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
 
 	if (tx_mbuf_pool == NULL)
@@ -1095,6 +1115,8 @@ int main(int argc, char *argv[])
  	stacks = allocate_stacks_from_hugepages();
  	#endif
 
+	rocksdb_init();
+	
 	/* Initialize dpdk. */
 	args_parsed = dpdk_init(argc, argv);
 
@@ -1112,7 +1134,7 @@ int main(int argc, char *argv[])
 	if (port_init(dpdk_port, rx_mbuf_pool, num_rx_queues, num_tx_queues) != 0)
 		rte_exit(EXIT_FAILURE, "Cannot init port %d\n", dpdk_port);
 
-	rocksdb_init();
+	//rocksdb_init();
 	run_server();
 
 	return 0;

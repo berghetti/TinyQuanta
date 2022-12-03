@@ -8,7 +8,7 @@
 
 #include <unistd.h>  // sysconf() - get CPU count
 
-const char DBPath[] = "./my_db";
+const char DBPath[] = "/tmpfs/experiments/my_db";
 
 int main(int argc, char **argv) {
   rocksdb_t *db;
@@ -22,9 +22,15 @@ int main(int argc, char **argv) {
   // create the DB if it's not already present
   rocksdb_options_set_create_if_missing(options, 1);
 
+  rocksdb_slicetransform_t * prefix_extractor = rocksdb_slicetransform_create_capped_prefix(8);
+  rocksdb_options_set_prefix_extractor(options, prefix_extractor);
+  rocksdb_options_set_plain_table_factory(options, 0, 10, 0.75, 3);
+
   // open DB
   char *err = NULL;
   db = rocksdb_open(options, DBPath, &err);
+  if(err)
+  	printf("%s\n", err);
   assert(!err);
 
   // Put key-value
@@ -37,9 +43,11 @@ int main(int argc, char **argv) {
                     &err);
         assert(!err);
   }
+  rocksdb_flush(db, rocksdb_flushoptions_create(), &err);
+  assert(!err);
 
   // Get value
-  rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
+  /*rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
   for (int i = 0; i < 5000; i++) {
 	size_t len;
 	char key[10];
@@ -50,11 +58,11 @@ int main(int argc, char **argv) {
 	assert(strcmp(returned_value, "value") == 0);
 	//printf("%s: %s\n", key, returned_value);
 	free(returned_value);
-  }
+  }*/
 
   // cleanup
   rocksdb_writeoptions_destroy(writeoptions);
-  rocksdb_readoptions_destroy(readoptions);
+  //rocksdb_readoptions_destroy(readoptions);
   rocksdb_options_destroy(options);
   rocksdb_close(db);
 
