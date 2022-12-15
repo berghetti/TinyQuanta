@@ -1,5 +1,4 @@
 #!/bin/bash
 
-rm -rf ./my_db/
-./create_db
-./create_db
+sudo rm -rf /tmpfs/experiments/my_db/
+sudo ./create_db

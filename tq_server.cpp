@@ -11,6 +11,7 @@
 #include <rte_udp.h>
 #include <rte_ring.h>
 #include <rte_mbuf_pool_ops.h>
+#include <rte_malloc.h>
 #include <vector>
 #include <iostream>
 #include <queue>
@@ -21,30 +22,44 @@
 #include "ci_lib.h"
 #include <string>
 #include <sys/mman.h> // mmap, munmap
+#include "fake_work_cp.h"
+
+#ifdef RECORD_NUM_PRE
+#include <csignal>
+#endif
 
 #define NUM_WORKER_THREADS 16
-#define NUM_WORKER_COROS 4
+#ifndef NUM_WORKER_COROS
+#define NUM_WORKER_COROS 8/*4*/
+#endif
+#define MAX_DISPATCH_UNIT 4
 
 // shared among cores
-#define RX_RING_SIZE 1024
-#define RX_QUEUE_BURST_SIZE 32
-#define RX_MBUF_POOL_SIZE 32767
-#define RX_MBUF_CACHE_SIZE 250
+#define RX_RING_SIZE 4096/*1024*/
+#define RX_QUEUE_BURST_SIZE (NUM_WORKER_THREADS * MAX_DISPATCH_UNIT)
+#define RX_MBUF_POOL_SIZE 131071/*32767*/
+#define RX_MBUF_CACHE_SIZE 500
 #define TX_MBUF_POOL_SIZE 8191
-#define TX_MBUF_CACHE_SIZE 250
+#define TX_MBUF_CACHE_SIZE 500
 
 // per-core states
 #define TX_RING_SIZE 128
-#define TX_QUEUE_BURST_SIZE 4
-#define DISPATCH_RING_SIZE 256
-#define DISPATCH_RING_BURST_SIZE 4
-#define DISPATCH_RING_DEQUEUE_PERIOD 8
+#define TX_QUEUE_BURST_SIZE 2
+#define TX_DEQUEUE_PERIOD 8
+#define DISPATCH_RING_SIZE 4096 /*256*/
+#define DISPATCH_RING_DEQUEUE_PERIOD 1/*2*/
+
+#ifdef NEW_DISPATCHER
+#define RETURN_RING_BURST_SIZE 64
+#define RETURN_RING_CHECKIN_PERIOD_PER_THREAD 8/*2*/
+#define RETURN_RING_CHECKIN_PERIOD 1//(NUM_WORKER_THREADS * RETURN_RING_CHECKIN_PERIOD_PER_THREAD)
+#else
 #define RETURN_RING_SIZE 512
 #define RETURN_RING_BURST_SIZE 8
 #define RETURN_RING_CHECKIN_PERIOD (RETURN_RING_BURST_SIZE * NUM_WORKER_THREADS * 2)
 #define FREE_MBUF_MAX_BATCH_SIZE (RETURN_RING_SIZE * NUM_WORKER_THREADS)
-#define MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN 128
-#define MAX_RUNNING_JOBS_TO_CHECKIN (NUM_WORKER_THREADS * MAX_RUNNING_JOBS_PER_THREAD_TO_CHECKIN)
+#endif
+
 #define MAX_NUM_RX_MBUF_PER_THREAD (DISPATCH_RING_SIZE + NUM_WORKER_COROS + RETURN_RING_BURST_SIZE)
 #define MAX_NUM_TX_MBUF_PER_THREAD (NUM_WORKER_COROS + TX_QUEUE_BURST_SIZE)
 
@@ -64,9 +79,13 @@
 #define BASE_CPU 0
 #endif
 
+#define CACHE_LINE_SIZE 64
+
 typedef struct worker_arg {
 	struct rte_ring* rx_mbuf_dispatch_q;
+    #ifndef NEW_DISPATCHER
     struct rte_ring* rx_mbuf_return_q;
+    #endif
     #ifdef STACKS_FROM_HUGEPAGE
     char* stack_pool;
     #endif
@@ -76,14 +95,20 @@ typedef struct worker_arg {
 typedef struct worker_info
 {
     struct rte_ring* rx_mbuf_dispatch_q;
+    #ifndef  NEW_DISPATCHER
     struct rte_ring* rx_mbuf_return_q;
+    #endif
     pthread_t* work_thread;
     int wid;
     int version_number;
     int num_running_jobs;
 
+    #ifdef NEW_DISPATCHER
+    worker_info(int wid) : rx_mbuf_dispatch_q(nullptr),  work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0) {}
+    #else
     worker_info(int wid) : rx_mbuf_dispatch_q(nullptr),  rx_mbuf_return_q(nullptr), work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0) {}
- 
+    #endif
+
     friend bool operator< (worker_info const& lhs, worker_info const& rhs) {
     	if(lhs.version_number != rhs.version_number)
     		return lhs.version_number > rhs.version_number;
@@ -99,13 +124,26 @@ typedef boost::coroutines2::coroutine<void*>   coro_t;
 // job type
 typedef enum job_type {
     ROCKSDB_GET = 0xA,
-    ROCKSDB_SCAN 
+    ROCKSDB_SCAN,
+    EB_SHORT,
+    EB_LONG,
+    HB_SHORT,
+    HB_LONG,
+    TPC_P,
+    TPC_O,
+    TPC_N,
+    TPC_D,
+    TPC_S,
+    EXP
 } job_type_t;
 // job info passed to worker coroutine
 typedef struct job_info {
     job_type_t jtype;
     uint32_t key;
-    char* output_data;
+    #ifdef SERVER_LAT
+    struct rte_rocksdb_hdr *rocksdb_hdr;
+    uint64_t job_start_time;
+    #endif
 } job_info_t;
 
 typedef struct coro_info 
@@ -140,26 +178,48 @@ bool coro_info_ptr_cmp(const coro_info_t* ptr1, const coro_info_t* ptr2) {
 
 class SimpleStack {
 private:
-	char* 			vp_;
     std::size_t     size_;
 
 public:
-    SimpleStack( char* vp, std::size_t size = STACK_SIZE ) BOOST_NOEXCEPT_OR_NOTHROW :
-        vp_(vp), size_( size) {
+    SimpleStack( std::size_t size = STACK_SIZE ) BOOST_NOEXCEPT_OR_NOTHROW :
+        size_( size) {
     }
 
     boost::context::stack_context allocate() {
-        boost::context::stack_context sctx;
+        void * vp = rte_malloc(nullptr, size_, 0);
+        if (!vp) {
+            throw std::bad_alloc();
+        }
+	boost::context::stack_context sctx;
         sctx.size = size_;
-        sctx.sp = vp_ + sctx.size; 
+        sctx.sp = static_cast< char * >( vp) + sctx.size;
         return sctx;
     }
 
     void deallocate( boost::context::stack_context & sctx) BOOST_NOEXCEPT_OR_NOTHROW {
         BOOST_ASSERT( sctx.sp);
         // don't need to do anything, dispatcher is gonna free it
+	void * vp = static_cast< char * >( sctx.sp) - sctx.size;
+        rte_free( vp);
     }
 };
+
+#ifdef NEW_DISPATCHER
+struct cache_filled_size {
+	uint64_t size;
+	char cache_line_filler[CACHE_LINE_SIZE - sizeof(uint64_t)];
+};
+static struct cache_filled_size *curr_sizes;
+#endif
+
+#ifdef SERVER_LAT
+struct rte_pktmbuf_pool_private_with_start_tsc {
+     uint16_t mbuf_data_room_size;
+     uint16_t mbuf_priv_size;
+     uint32_t flags;
+     uint64_t start_tsc;
+ };
+#endif
 
 static rocksdb_t *db;
 
@@ -174,11 +234,13 @@ static unsigned int server_port = 8001;
 static unsigned int num_rx_queues = 1;
 static unsigned int num_tx_queues = NUM_WORKER_THREADS;
 
-static bool debug_mode = false;
-
 __thread uint64_t time_interval = 0;
 
-__thread uint64_t get_start_time, get_end_time; 
+#ifdef RECORD_NUM_PRE
+static struct cache_filled_size num_pres[NUM_WORKER_THREADS];
+#endif
+
+//__thread uint64_t get_start_time, get_end_time; 
 
 __thread coro_t::push_type *curr_yield;
 
@@ -368,27 +430,34 @@ void coro(int coro_id, job_info_t* &jinfo, coro_t::push_type &yield)
     rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
     char key[10];
     char val[10];
+    const char *retr_key;
+    size_t klen;
+    #ifdef SERVER_LAT
+    uint32_t lat;
+    #endif
 
     for(;;) {
-    	assert(jinfo->jtype == ROCKSDB_GET);
-        
-        get_start_time = rdtsc_w_lfence();
+        if(jinfo->jtype == ROCKSDB_GET) {
+        	snprintf(key, 10, "key%d", jinfo->key);
+		rocksdb_get_in_place(db, readoptions, key, strlen(key), val, &vallen, &err);
+        	assert(!err);
+        	assert(strcmp(val, "value") == 0);
+	}  else if (jinfo->jtype == ROCKSDB_SCAN) {
+		rocksdb_scan(db, readoptions);	
+	}  else {
+		#ifdef SYNTHETIC
+		// synthetic workloads
+		// every loop is 6 cycles
+		jinfo->key = fake_work_rand_gen(jinfo->key, jinfo->key * 2.1/6);
+		#else
+		assert(false);
+		#endif
+	}
 
-        // rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
-        
-        // char *returned_value = rocksdb_get(db, readoptions, jinfo->input_data, strlen(jinfo->input_data), &vallen, &err);
-        snprintf(key, 10, "key%d", jinfo->key);
-	rocksdb_get_in_place(db, readoptions, key, strlen(key), val, &vallen, &err);
-        assert(!err);
-        assert(strcmp(val, "value") == 0);
-        // memcpy((char*)jinfo->output_data, returned_value, vallen);
-    	// assert(strcmp(returned_value, "value") == 0);
-    	// free(returned_value);
-
-    	//rocksdb_readoptions_destroy(readoptions);
-
-    	get_end_time = rdtsc_w_lfence();
-
+	#ifdef SERVER_LAT
+	lat = rdtsc() - jinfo->job_start_time;
+        jinfo->rocksdb_hdr->run_ns = rte_cpu_to_be_32(lat);
+	#endif
     	// TODO: leverage this return value? 
     	yield(&yield);
     }
@@ -401,11 +470,7 @@ static bool is_rx_mbuf_valid(const struct rte_mbuf *rx_mbuf) {
 	return check_eth_hdr(rx_mbuf) && check_ip_hdr(rx_mbuf);
 }
 
-void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
-
-	#ifdef TIME_STAGE
-	uint64_t start_time = rdtsc_w_lfence();
-	#endif
+void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro, uint32_t queue_size = 0) {
 
 	//printf("Packet processed!\n");
 	/*struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
@@ -474,7 +539,16 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	rte_rocksdb_hdr->id = rx_ptr_rocksdb_hdr->id;
 	rte_rocksdb_hdr->req_type = rx_ptr_rocksdb_hdr->req_type;
 	rte_rocksdb_hdr->req_size = rx_ptr_rocksdb_hdr->req_size;
+	#ifdef SERVER_LAT
+	idle_coro->jinfo->job_start_time = static_cast< struct rte_pktmbuf_pool_private_with_start_tsc* >(rte_mbuf_to_priv(rx_mbuf))->start_tsc;
+	idle_coro->jinfo->rocksdb_hdr = rte_rocksdb_hdr;
+	#else
+	#ifdef QUEUE_SIZE
+	rte_rocksdb_hdr->run_ns = rte_cpu_to_be_32(queue_size);
+	#else
 	rte_rocksdb_hdr->run_ns = 0;
+	#endif
+	#endif
 	//*(uint32_t*)((char*)buf_ptr + sizeof(struct rte_udp_hdr)) = *seq_num;
 	//idle_coro->jinfo->output_data = buf_ptr + sizeof(struct rte_udp_hdr) + sizeof(uint32_t);
 
@@ -482,11 +556,6 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro) {
 	//tx_mbuf->l3_len = sizeof(struct rte_ipv4_hdr);
 	//tx_mbuf->ol_flags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
 
-	#ifdef TIME_STAGE
-	uint64_t end_time = rdtsc_w_lfence();
-	if(end_time - start_time > 1000)
-		std::cout << end_time - start_time << " cycles" << std::endl;
-	#endif
 }
 
 static int rocksdb_init() 
@@ -546,34 +615,31 @@ void* worker(void* arg) {
 
     cp_pid = gettid();
     // per thread
-    #ifdef USE_EMPTY_HANDLER
-    register_ci_direct(1000/*doesn't matter*/, QUANTUM_CYCLE, empty_handler);
-    #else
     register_ci_direct(1000/*doesn't matter*/, QUANTUM_CYCLE, call_the_yield);
-    #endif
 
     struct rte_ring* rx_mbuf_dispatch_q = worker_arg->rx_mbuf_dispatch_q;
+    #ifndef NEW_DISPATCHER 
     struct rte_ring* rx_mbuf_return_q = worker_arg->rx_mbuf_return_q;
+    #endif
     #ifdef STACKS_FROM_HUGEPAGE
     char* stack_pool = worker_arg->stack_pool;
     #endif
-    struct rte_mbuf **rx_bufs = static_cast<struct rte_mbuf **>(malloc(DISPATCH_RING_BURST_SIZE * sizeof(struct rte_mbuf*)));
-    struct rte_mbuf **return_rx_bufs = static_cast<struct rte_mbuf **>(malloc(RETURN_RING_BURST_SIZE * sizeof(struct rte_mbuf*)));
-    struct rte_mbuf **tx_bufs = static_cast<struct rte_mbuf **>(malloc(TX_QUEUE_BURST_SIZE * sizeof(struct rte_mbuf*)));
+    struct rte_mbuf **rx_bufs = static_cast<struct rte_mbuf **>(rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(struct rte_mbuf*), 0));
+    struct rte_mbuf **return_rx_bufs = static_cast<struct rte_mbuf **>(rte_malloc(nullptr, RETURN_RING_BURST_SIZE * sizeof(struct rte_mbuf*), 0));
+    struct rte_mbuf **tx_bufs = static_cast<struct rte_mbuf **>(rte_malloc(nullptr, TX_QUEUE_BURST_SIZE * sizeof(struct rte_mbuf*), 0));
    	
-   	coro_t::pull_type *worker_coros = static_cast<coro_t::pull_type*>(malloc(NUM_WORKER_COROS * sizeof(coro_t::pull_type)));
-    coro_info_t *worker_coro_infos = static_cast<coro_info_t *>(malloc(NUM_WORKER_COROS * sizeof(coro_info_t)));
-    job_info_t *job_infos = static_cast<job_info*>(malloc(NUM_WORKER_COROS * sizeof(job_info_t)));
+   	coro_t::pull_type *worker_coros = static_cast<coro_t::pull_type*>(rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(coro_t::pull_type), 0));
+    coro_info_t *worker_coro_infos = static_cast<coro_info_t *>(rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(coro_info_t), 0));
+    job_info_t *job_infos = static_cast<job_info*>(rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(job_info_t), 0));
 
    	uint16_t num_rx_buf, nb_tx, nb_return;
-   	uint16_t i; 
-	uint16_t dispatch_index = 0, return_rx_buf_idx = 0, tx_buf_idx = 0;
+   	int i; 
+	uint16_t dispatch_index = 0, return_rx_buf_idx = 0, tx_buf_idx = 0, flush_index = 0;
 	bool force_flush, force_dispatch;
 	uint8_t port = dpdk_port;
 	coro_info_t* idle_coro, next_coro;
 	std::vector<coro_info_t*> idle_coros;
 	idle_coros.reserve(NUM_WORKER_COROS);
-	// std::deque<coro_info_t*> idle_coros;
 
 	// flexibility in which end to use
 	#ifdef LAS
@@ -586,7 +652,11 @@ void* worker(void* arg) {
     uint64_t start, stage1_end, stage2_end, stage3_end, stage4_end, yield_end_time, stage1_cycles = 0, stage2_cycles = 0, stage3_cycles = 0, stage4_cycles = 0, num_samples = 0, total_work_time = 0;
     #endif
 
-    uint64_t total_num_quanta = 0, total_execution_cycles = 0, finished_jobs = 0, prev_finished_jobs = 0;
+    #ifdef QUEUE_SIZE
+    uint32_t queue_size;
+    #endif
+
+    //uint64_t total_num_quanta = 0, total_execution_cycles = 0, finished_jobs = 0, prev_finished_jobs = 0;
 
     printf("Worker %d initialize all worker coroutines\n", tid);
 
@@ -595,7 +665,7 @@ void* worker(void* arg) {
     	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(stack_pool), boost::bind(coro, coro_id, &job_infos[coro_id], _1));
     	stack_pool += STACK_SIZE;
     	#else
-    	worker_coros[coro_id] = coro_t::pull_type(boost::bind(coro, coro_id, &job_infos[coro_id], _1));
+    	worker_coros[coro_id] = coro_t::pull_type(SimpleStack(), boost::bind(coro, coro_id, &job_infos[coro_id], _1));
     	#endif
     	worker_coro_infos[coro_id].coro = &worker_coros[coro_id];
     	worker_coro_infos[coro_id].yield = static_cast<coro_t::push_type*>(worker_coros[coro_id].get()); 
@@ -617,10 +687,6 @@ void* worker(void* arg) {
 
 		if(!busy_coros.empty()) {
 			
-			#ifdef LOOP_YIELD
-			for(;;) {
-			#endif
-
 			#ifdef LAS
 			coro_info_t* next_coro = busy_coros.top();
 			busy_coros.pop();
@@ -639,48 +705,45 @@ void* worker(void* arg) {
 		    // resume next_coro
 		    (*(next_coro->coro))();
 		    
-		    #ifdef TIME_STAGE
-		    yield_end_time = rdtsc_w_lfence();
-		    next_coro->execution_time += yield_end_time - LastCycleTS;
-		    total_work_time += time_interval;
-		    #endif
-
 		    // check whether next_coro finish
 		    if(next_coro->coro->get() == nullptr) {
 		    	// not finished
-		    	next_coro->num_quanta ++;
 		    	#ifdef LAS
-				busy_coros.push(next_coro);
-				#else
-				#ifdef LOOP_YIELD
-				busy_coros.push_front(next_coro);
-		    	#else 
+			next_coro->num_quanta += num_assigned_quanta;
+			busy_coros.push(next_coro);
+			#else
+			next_coro->num_quanta ++;
 		    	busy_coros.push_back(next_coro);
 		    	#endif
-		    	#endif
+
+			#ifdef RECORD_NUM_PRE
+			if(likely(next_coro->jinfo->jtype == ROCKSDB_SCAN))
+				num_pres[tid].size++;
+			#endif
 		    }
 		    else {
 		    	// finished 
 		    	return_rx_bufs[return_rx_buf_idx++] = next_coro->rx_mbuf;
 		    	tx_bufs[tx_buf_idx++] = next_coro->tx_mbuf;
-		    	total_execution_cycles += get_end_time - get_start_time; //next_coro->execution_time;
-		    	total_num_quanta += next_coro->num_quanta + 1;
-		    	finished_jobs++;
-
+		    	//total_execution_cycles += get_end_time - get_start_time; 
+		    	//total_num_quanta += next_coro->num_quanta + 1;
+		    	//finished_jobs++;
+		
 		    	idle_coros.push_back(next_coro);
-		    	#ifdef LOOP_YIELD
-		    	break;
-		    	#endif
+			#ifdef NEW_DISPATCHER
+			curr_sizes[tid].size++;
+			#endif
 		    }
 		    #ifdef LAS
-		    dispatch_index += num_assigned_quanta; 
+		    dispatch_index += quantum_idx; 
+		    flush_index += quantum_idx;
 		    #else
 		    dispatch_index++;
+		    flush_index++;
 		    #endif
-		    #ifdef LOOP_YIELD
-			}
-			#endif
-		} else {
+		}
+
+		if(busy_coros.empty()){
 			force_dispatch = true;
 			force_flush = (tx_buf_idx > 0);
 		}
@@ -691,12 +754,18 @@ void* worker(void* arg) {
 
 		if(force_dispatch || (dispatch_index >= DISPATCH_RING_DEQUEUE_PERIOD && !idle_coros.empty())) {
 	    	// get new jobs if (1) there are idle cores and (2) dequeue_period is up
-			num_rx_buf = rte_ring_dequeue_burst(rx_mbuf_dispatch_q, (void **)rx_bufs, (idle_coros.size() < DISPATCH_RING_BURST_SIZE)? idle_coros.size() : DISPATCH_RING_BURST_SIZE, nullptr); 
-
-			for(i = 0; i < num_rx_buf; i++) {
+			num_rx_buf = rte_ring_dequeue_burst(rx_mbuf_dispatch_q, (void **)rx_bufs, idle_coros.size(), nullptr); 
+			#ifdef QUEUE_SIZE
+			queue_size = busy_coros.size();
+			#endif
+			/*for(i = 0; i < num_rx_buf; i++) {
 				if(i + PREFETCH_OFFSET < num_rx_buf) {
 					rte_mbuf_prefetch_part1(rx_bufs[i + PREFETCH_OFFSET]);
-				}
+				}*/
+			for(i = num_rx_buf - 1; i >= 0; i--) {
+				if(i >= PREFETCH_OFFSET) {
+                                        rte_mbuf_prefetch_part1(rx_bufs[i - PREFETCH_OFFSET]);
+                                }
 				if(unlikely(!is_rx_mbuf_valid(rx_bufs[i]))) {
 					// invalid packet, free the rx_mbuf
 					// TODO: fix this
@@ -707,9 +776,11 @@ void* worker(void* arg) {
 				} 
 				idle_coro = idle_coros.back();
 				idle_coros.pop_back();
-				// idle_coro = idle_coros.front();
-				// idle_coros.pop_front();
+				#ifdef QUEUE_SIZE
+				process_rx_mbuf(rx_bufs[i], idle_coro, queue_size);
+				#else
 				process_rx_mbuf(rx_bufs[i], idle_coro);
+				#endif
 				// prioritize new jobs
 				#ifdef LAS
 				busy_coros.push(idle_coro);
@@ -725,12 +796,12 @@ void* worker(void* arg) {
     	#endif
 
 	    /* TX path */
-	    if(force_flush || tx_buf_idx == TX_QUEUE_BURST_SIZE) {
-	    	// std::cout << "Worker " << tid << " does TX flush" << std::endl;
+	    if(force_flush || (flush_index >= TX_DEQUEUE_PERIOD && tx_buf_idx != 0) || tx_buf_idx == TX_QUEUE_BURST_SIZE) {
 	  		nb_tx = rte_eth_tx_burst(port, tid, tx_bufs, tx_buf_idx);
 	  		if (unlikely(nb_tx != tx_buf_idx))
 				printf("error: worker %d could not transmit all packets: %d %d\n", tid, tx_buf_idx, nb_tx);
 	  		tx_buf_idx = 0;
+			flush_index = 0;
 	    }
 
 	    #ifdef TIME_STAGE
@@ -739,12 +810,15 @@ void* worker(void* arg) {
 
 	    /* return rx_mbuf */
 	    if(force_flush || return_rx_buf_idx == RETURN_RING_BURST_SIZE) {
-	    	// std::cout << "Worker " << tid << " does RX return flush" << std::endl;
-	    	nb_return = rte_ring_enqueue_burst(rx_mbuf_return_q, (void **)return_rx_bufs, return_rx_buf_idx, nullptr);
+		#ifdef NEW_DISPATCHER
+		rte_pktmbuf_free_bulk(return_rx_bufs, return_rx_buf_idx);
+		#else
+		nb_return = rte_ring_enqueue_burst(rx_mbuf_return_q, (void **)return_rx_bufs, return_rx_buf_idx, nullptr);
 	    	if (unlikely(nb_return != return_rx_buf_idx)) {
 	    		printf("error: worker %d could not return all rx-mbufs: %d %d\n", tid, return_rx_buf_idx, nb_return);
 	    		abort();
 	    	}
+		#endif
 	    	return_rx_buf_idx = 0;
 	    }
 
@@ -754,14 +828,14 @@ void* worker(void* arg) {
     	stage2_cycles += stage2_end - stage1_end;
     	stage3_cycles += stage3_end - stage2_end;
     	stage4_cycles += stage4_end - stage3_end;
-    	uint64_t threshold = (debug_mode)? 100 : 10000000;
+    	uint64_t threshold = 2500000/*10000000*/;
     	num_samples++; 
     	if(tid == 0 && num_samples >= threshold) {
     		std::cout << "Stage 1: " << stage1_cycles/num_samples;
     		std::cout << ", Stage 2: " << stage2_cycles/num_samples;
     		std::cout << ", Stage 3: " << stage3_cycles/num_samples;
-    		std::cout << ", Stage 4: " << stage4_cycles/num_samples/* << std::endl*/;
-    		std::cout << ", Work time: " << total_work_time/num_samples;
+    		std::cout << ", Stage 4: " << stage4_cycles/num_samples << std::endl;
+    		//std::cout << ", Work time: " << total_work_time/num_samples;
     		stage1_cycles = 0;
     		stage2_cycles = 0;
     		stage3_cycles = 0;
@@ -771,11 +845,11 @@ void* worker(void* arg) {
     	}
     	#endif
 
-    	if(unlikely(tid == 0 && (finished_jobs - prev_finished_jobs) > 100000)) {
+    	/*if(unlikely(tid == 0 && (finished_jobs - prev_finished_jobs) > 100000)) {
     		std::cout << "Execution time: " << (float) total_execution_cycles * 1000 * 1000 /(finished_jobs * rte_get_timer_hz()) << " us" << std::endl;
     		prev_finished_jobs = finished_jobs;	
     		std::cout << "Average number of quanta for each job: " << (float) total_num_quanta / finished_jobs << std::endl;
-    	}
+    	}*/
 	}
 }
 
@@ -795,6 +869,18 @@ static char* allocate_stacks_from_hugepages() {
 
 static void deallocate_stacks(char* stacks) {
 	munmap(stacks, round_to_huge_page_size(NUM_WORKER_THREADS * NUM_WORKER_COROS * STACK_SIZE));
+}
+#endif
+
+#ifdef RECORD_NUM_PRE
+static void signal_callback_handler(int signum) {
+   uint64_t total_num_pre = 0;
+   for(int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
+        total_num_pre += num_pres[wid].size;
+   }
+   std::cout << "Number of preemptions per core: " << total_num_pre/NUM_WORKER_THREADS << std::endl;
+   // Terminate program
+   std::exit(signum);
 }
 #endif
 
@@ -823,12 +909,31 @@ static int run_server()
 		snprintf(name, sizeof(name), "dispatch_ring_%d", wid);
 		worker_info_vec[wid].rx_mbuf_dispatch_q = rte_ring_create(name, DISPATCH_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     }
+    #ifndef NEW_DISPATCHER
     /* return queues */
 	for(int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
 		char name[32];
 		snprintf(name, sizeof(name), "return_ring_%d", wid);
 		worker_info_vec[wid].rx_mbuf_return_q = rte_ring_create(name, RETURN_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     }
+    #else
+    /* thread-local prev sizes of workers */
+    uint64_t prev_sizes[NUM_WORKER_THREADS] = {0};
+    /* allocate space for curr sizes of workers */
+    assert(sizeof(struct cache_filled_size) == CACHE_LINE_SIZE);
+    curr_sizes =  static_cast<struct cache_filled_size *>(rte_malloc(nullptr, NUM_WORKER_THREADS * sizeof(struct cache_filled_size), CACHE_LINE_SIZE)); 
+    for(int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
+	    curr_sizes[wid].size = 0;
+    }
+    #endif
+
+    #ifdef RECORD_NUM_PRE
+    for(int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
+            num_pres[wid].size = 0;
+    }
+    // Register signal and signal handler
+    std::signal(SIGINT, signal_callback_handler);
+    #endif
 	/* worker threads */
     for(int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
         worker_args[wid].wid = wid;
@@ -837,8 +942,10 @@ static int run_server()
         stacks += NUM_WORKER_COROS * STACK_SIZE; 
         #endif
         worker_args[wid].rx_mbuf_dispatch_q = worker_info_vec[wid].rx_mbuf_dispatch_q;
-        worker_args[wid].rx_mbuf_return_q = worker_info_vec[wid].rx_mbuf_return_q;
-        pthread_create(&worker_threads[wid], nullptr, *worker, static_cast<void*>(&worker_args[wid]));
+	#ifndef NEW_DISPATCHER
+	worker_args[wid].rx_mbuf_return_q = worker_info_vec[wid].rx_mbuf_return_q;
+	#endif
+	pthread_create(&worker_threads[wid], nullptr, *worker, static_cast<void*>(&worker_args[wid]));
         worker_info_vec[wid].work_thread = &worker_threads[wid];
 	}
 
@@ -849,14 +956,22 @@ static int run_server()
 
 	uint8_t port = dpdk_port;
 	struct rte_mbuf *rx_bufs[RX_QUEUE_BURST_SIZE];
-	struct rte_mbuf *return_rx_bufs[FREE_MBUF_MAX_BATCH_SIZE];
 	uint16_t nb_rx, i, nb_return, total_return_size, return_size;
 	uint16_t return_queue_checkin_idx = 0;
 	worker_info_t* tmp_w;
 	int cur_version_number = 0;
 	//int num_received_jobs = 0;
-	bool force_pull_return; 
-	int total_running_jobs = 0;
+	int total_running_jobs = 0, packet_drop_count = 0;
+	#ifdef NEW_DISPATCHER
+	uint32_t dispatch_size, max_dispatch_size;
+	uint64_t curr_size;
+	#else
+	struct rte_mbuf *return_rx_bufs[FREE_MBUF_MAX_BATCH_SIZE];
+	#endif
+
+	#ifdef SERVER_LAT
+	uint32_t start_tsc;
+	#endif
 
 	/* Run until the application is quit or killed. */
 	for (;;) {
@@ -867,7 +982,43 @@ static int run_server()
 		if (nb_rx == 0)
 			continue;
 
-		force_pull_return = false;
+		#ifdef SERVER_LAT
+		start_tsc = rdtsc();
+		for(i = 0; i < nb_rx; i ++) {
+			static_cast< struct rte_pktmbuf_pool_private_with_start_tsc* >(rte_mbuf_to_priv(rx_bufs[i]))->start_tsc = start_tsc;
+		}
+		#endif
+
+		#ifdef NEW_DISPATCHER
+		// efficient way of computing ceil(nb_rx/NUM_WORKER_THREADS)
+		max_dispatch_size = (nb_rx + NUM_WORKER_THREADS - 1) / NUM_WORKER_THREADS;
+		for(i = 0; i < nb_rx; i += max_dispatch_size) {
+			tmp_w = worker_queue.top();
+                        worker_queue.pop();
+			dispatch_size = (i + max_dispatch_size < nb_rx)? max_dispatch_size : nb_rx - i; 
+			nb_return = rte_ring_enqueue_burst(tmp_w->rx_mbuf_dispatch_q, (void **)&rx_bufs[i], dispatch_size, nullptr);
+			
+			if(unlikely(nb_return != dispatch_size)) {
+				// drop all the packets onwards 
+                                // dispatcher may have stale information about the number of jobs each worker has, hence force a return pull
+				rte_pktmbuf_free_bulk(&rx_bufs[i + nb_return], dispatch_size - nb_return);
+				total_running_jobs += nb_return;
+				tmp_w->num_running_jobs += nb_return;
+				worker_queue.push(tmp_w);
+				//std::cout << "Packet drop: total number of running jobs " << total_running_jobs << std::endl;
+				packet_drop_count++;
+				if(packet_drop_count == 100000) {
+					std::cout << "100K packet drops!" << std::endl;
+					packet_drop_count = 0;
+				}
+				continue;	
+			}
+			tmp_w->num_running_jobs += nb_return;
+                        worker_queue.push(tmp_w);
+                        return_queue_checkin_idx += nb_return;
+                        total_running_jobs += nb_return;
+		}		
+		#else
 		for(i = 0; i < nb_rx; i++) {
 			tmp_w = worker_queue.top();
 			worker_queue.pop();
@@ -875,7 +1026,6 @@ static int run_server()
 				// drop this packet
 				// dispatcher may have stale information about the number of jobs each worker has, hence force a return pull
 				rte_pktmbuf_free(rx_bufs[i]);
-				force_pull_return = true;
 				worker_queue.push(tmp_w);
 				std::cout << "Packet drop: total number of running jobs " << total_running_jobs << std::endl;
 				continue;
@@ -885,42 +1035,43 @@ static int run_server()
 			return_queue_checkin_idx++;
 			total_running_jobs++;
 		}
+		#endif
 
 		// check in
-		if(return_queue_checkin_idx >= RETURN_RING_CHECKIN_PERIOD || total_running_jobs >= MAX_RUNNING_JOBS_TO_CHECKIN || force_pull_return ) {
+		if(return_queue_checkin_idx >= RETURN_RING_CHECKIN_PERIOD) {
 			total_return_size = 0;
 			for(i = 0; i < NUM_WORKER_THREADS; i++) {
 				tmp_w = worker_queue.top();
 				worker_queue.pop();
 				assert(tmp_w->version_number == cur_version_number);
+				#ifdef NEW_DISPATCHER
+				curr_size = curr_sizes[tmp_w->wid].size;
+				return_size = curr_size - prev_sizes[tmp_w->wid];
+				prev_sizes[tmp_w->wid] = curr_size;
+				total_return_size += return_size;
+				#else
 				return_size = 0;
 				for(;;) {
 					// drain the return queue
 					nb_return = rte_ring_dequeue_burst(tmp_w->rx_mbuf_return_q, (void **)&return_rx_bufs[total_return_size], RETURN_RING_BURST_SIZE, nullptr);
-					return_size += nb_return;
 					total_return_size += nb_return;
-					if(nb_return == 0/*< RETURN_RING_BURST_SIZE*/)
+					return_size += nb_return;
+					if(nb_return == 0)
 						break;
 				}
-				// std::cout << "Current version " << cur_version_number << " Worker " << tmp_w->wid << " version " << tmp_w->version_number << " returns " << return_size << " rx_mbufs" <<  std::endl;
+				#endif
 				tmp_w->num_running_jobs -= return_size;
 				tmp_w->version_number ++;
 				worker_queue.push(tmp_w);
 			}
+			#ifndef NEW_DISPATCHER
 			// free them in a large bulk
 			rte_pktmbuf_free_bulk(return_rx_bufs, total_return_size);
+			#endif
 			return_queue_checkin_idx = 0;
 			cur_version_number++;
 			total_running_jobs -= total_return_size;
 		}
-		/*num_received_jobs += nb_rx;
-		if(num_received_jobs > 20000000) {
-    		std::cout << "Terminated!" << std::endl;
-    		#ifdef STACKS_FROM_HUGEPAGE
-    		deallocate_stacks(stacks);
-    		#endif
-    		abort();
-    		}*/
 	}
 
 	return 0;
@@ -1001,7 +1152,11 @@ rte_pktmbuf_pool_create_spsc(const char *name, unsigned int n,
 	int socket_id)
 {
 	struct rte_mempool *mp;
+	#ifdef SERVER_LAT
+        struct rte_pktmbuf_pool_private_with_start_tsc mbp_priv;
+        #else
 	struct rte_pktmbuf_pool_private mbp_priv;
+	#endif
 	const char *mp_ops_name = NULL;
 	unsigned elt_size;
 	int ret;
@@ -1018,8 +1173,19 @@ rte_pktmbuf_pool_create_spsc(const char *name, unsigned int n,
 	mbp_priv.mbuf_data_room_size = data_room_size;
 	mbp_priv.mbuf_priv_size = priv_size;
 
+	#ifdef SERVER_LAT
+	size_t private_size = sizeof(struct rte_pktmbuf_pool_private_with_start_tsc);
+	#else
+	size_t private_size = sizeof(struct rte_pktmbuf_pool_private);
+	#endif
+	
+	#ifdef NEW_DISPATCHER
 	mp = rte_mempool_create_empty(name, n, elt_size, cache_size,
-		 sizeof(struct rte_pktmbuf_pool_private), socket_id, RTE_MEMPOOL_F_SP_PUT | RTE_MEMPOOL_F_SC_GET);
+                 private_size, socket_id, RTE_MEMPOOL_F_SC_GET);
+	#else
+	mp = rte_mempool_create_empty(name, n, elt_size, cache_size,
+		 private_size, socket_id, RTE_MEMPOOL_F_SP_PUT | RTE_MEMPOOL_F_SC_GET);
+	#endif
 	if (mp == NULL)
 		return NULL;
 
@@ -1097,14 +1263,19 @@ static int parse_args(int argc, char *argv[])
 }
 
 /* perform basic sanity check of the settings */
-void sanity_check()
+static void sanity_check()
 {	
 	assert(RX_MBUF_POOL_SIZE > NUM_WORKER_THREADS * MAX_NUM_RX_MBUF_PER_THREAD);
 	assert(TX_MBUF_POOL_SIZE > NUM_WORKER_THREADS * MAX_NUM_TX_MBUF_PER_THREAD);
+	#if defined(SERVER_LAT) && defined(QUEUE_SIZE)
+	assert(false);
+	#endif
+
 }
 /*
  * The main function, which does initialization and starts the client or server.
  */
+
 int main(int argc, char *argv[])
 {
 	sanity_check();

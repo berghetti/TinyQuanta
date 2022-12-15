@@ -8,6 +8,9 @@
 #include "ci_lib.h"
 
 #define BUCKET_SIZE 3000
+#ifndef QUANTUM_CYCLE
+#define QUANTUM_CYCLE 3000
+#endif
 
 uint64_t time_elapsed;
 __thread uint64_t sample_count = 0;
@@ -30,58 +33,31 @@ uint64_t rdtsc(){
 }
 #endif
 
-void __attribute__ ((optimize("O0"), noinline)) return_helper()
-{
-        return;
-}
+void scan_db(rocksdb_t *db) {
+	const char *retr_key;	
+	size_t klen;
 
-char* __attribute__ ((noinline)) rocksdb_get_helper(
-    rocksdb_t* db, const rocksdb_readoptions_t* readoptions, const char* key,
-    size_t keylen, size_t* vallen, char** errptr)
-{
-        uint64_t start = rdtsc();
-        char *returned_value = rocksdb_get(db, readoptions, key, keylen, vallen, errptr);
-        return_helper();
-        uint64_t end = rdtsc();
-        time_elapsed += end - start;
-        return returned_value;
-}
+	rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
+	
+	uint64_t start = rdtsc();
+	rocksdb_iterator_t *iter = rocksdb_create_iterator(db, readoptions);
+	rocksdb_iter_seek_to_first(iter);
+	while (rocksdb_iter_valid(iter)) {
+		retr_key = rocksdb_iter_key(iter, &klen);
+    		rocksdb_iter_next(iter);
+  	}
+  	rocksdb_iter_destroy(iter);
+	//rocksdb_scan(db, readoptions);
+	uint64_t end = rdtsc();
+	uint64_t time_elapsed = end - start;
 
-void get_db(rocksdb_t *db) {
-        //rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
-        char *err = NULL;
-        size_t len;
-        char key[10];
-        uint64_t intervals[5000];
-        for (int i = 0; i < 5000; i++) {
-                int key_val = i; //rand() % 5000;
-                snprintf(key, 10, "key%d", key_val);
-                rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
-                char *returned_value = rocksdb_get_helper(db, readoptions, key, strlen(key), &len, &err);
-                if(err)
-		    printf("%s\n", err);
-		assert(!err);
-                assert(strcmp(returned_value, "value") == 0);
-                //printf("%s: %s\n", key, returned_value);
-                //free(returned_value);
-                rocksdb_readoptions_destroy(readoptions);
-                //usleep(5 * 1000);
-        }
-        //printf("LocalLC is %d \n",LocalLC);
-        if(sample_count > 0)
+	if(sample_count > 0)
         {
                 printf("Average CI interval %ld IC, %ld cycles\n", total_ic/sample_count, total_tsc/sample_count);
-                printf("Outliers percentage is %.2f%%\n", (float)(outlier_count * 100) / (float)sample_count);
-                FILE *f = fopen("ci_interval_1000.dat", "wb");
-                fwrite(tsc_buckets, sizeof(char), BUCKET_SIZE * sizeof(uint64_t), f);
-                fclose(f);
-        }
-        printf("Average number of probes per get %d\n", NumProbes/5000);
-        printf("Average Get time %ld ns\n", time_elapsed/(uint64_t)(5000 * 2.1));
-        /*for (int i = 0; i < 5000; i++) {
-                printf("%f us\n", (float)intervals[i]/(2.6*1000));
-        }*/
-}
+        	printf("Outlier percentage %f%%\n", (float)(100 * outlier_count)/(float)(sample_count + outlier_count));
+	}
+	printf("Average SCAN time %ld us\n", time_elapsed/(uint64_t)(1000 * 2.1));
+}	
 
 void pin_to_cpu(int core){
         int ret;
@@ -117,7 +93,7 @@ void interrupt_handler_tsc_hist(long ic) {
 }
 
 void simplest_handler(long ic) {
-        if(ic < 5000) {
+        if(ic < 20000) {
                 total_ic += ic;
                 sample_count += 1;
         } else {
@@ -129,7 +105,7 @@ void simplest_handler(long ic) {
 int main(int argc, char **argv) {
 
         pin_to_cpu(30);
-        //register_ci(1000/*doesn't matter*/, 1000, simplest_handler);
+        //register_ci(1000/*doesn't matter*/, QUANTUM_CYCLE, simplest_handler);
 
         if(!tsc_buckets)
                 tsc_buckets = (uint64_t*)malloc(BUCKET_SIZE * sizeof(uint64_t));
@@ -156,12 +132,12 @@ int main(int argc, char **argv) {
 	if(err)
 		printf("%s\n", err);
 	assert(!err);
-        for(int i = 0; i < 10; i++) {
-		 total_ic = 0;
-		 sample_count = 0;
-		 outlier_count = 0;
-		 time_elapsed = 0;
-		 get_db(db);
+	for(int i = 0; i < 5; i++) {
+		total_ic = 0;
+                sample_count = 0;
+                outlier_count = 0;
+                time_elapsed = 0;
+		scan_db(db);
 	}
         rocksdb_options_destroy(options);
         rocksdb_close(db);
