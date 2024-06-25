@@ -29,7 +29,7 @@ TQ_ROOT = .
 
 # for RocksDB
 CFLAGS += -I $(TQ_ROOT)/RocksDB-TQ/include
-ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie -lbz2
+ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie -lbz2 -lzstd
 ROCKSDB_LIB = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_cp.a
 ROCKSDB_LIB_UNINST = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb.a
 ROCKSDB_LIB_CI =  $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_ci.a
@@ -47,7 +47,7 @@ CFLAGS += -I$(FAKE_WORK_LIB_HOME)
 
 #OPT = -O2 -fno-omit-frame-pointer -momit-leaf-frame-pointer
 
-all: tq_server tq_server_las tq_server_ci tq_client create_db profile_rocksdb_get profile_rocksdb_scan
+all: tq_server create_db profile_rocksdb_get profile_rocksdb_scan
 
 tq_server: tq_server.cpp Makefile $(PC_FILE)
 	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB) $(FAKE_WORK_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
