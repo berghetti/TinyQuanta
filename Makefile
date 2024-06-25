@@ -73,9 +73,6 @@ tq_server_fcfs: tq_server.cpp Makefile $(PC_FILE)
 tq_server_las: tq_server.cpp Makefile $(PC_FILE)
 	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB) $(FAKE_WORK_LIB) -o $@ $(CFLAGS) -DLAS $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
-tq_client: tq_client.cpp Makefile $(PC_FILE)
-	$(LLVM_CXX) $< -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(CP_LDFLAGS)
-
 create_db: create_db.c
 	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS)
 
@@ -89,4 +86,4 @@ test_fake_work_cp: test_fake_work_cp.cpp
 	$(LLVM_CXX) $< -flto $(FAKE_WORK_LIB) -o $@ $(CFLAGS) $(CP_LDFLAGS)
 
 clean:
-	rm -f tq_server tq_server_empty tq_server_las tq_client create_db profile_rocksdb_get profile_rocksdb_scan
+	rm -f tq_server tq_server_empty tq_server_las create_db profile_rocksdb_get profile_rocksdb_scan
