@@ -45,9 +45,9 @@
 // per-core states
 #define TX_RING_SIZE 128
 #define TX_QUEUE_BURST_SIZE 2
-#define TX_DEQUEUE_PERIOD 8
+#define TX_DEQUEUE_PERIOD 4/*8*/
 #define DISPATCH_RING_SIZE 4096 /*256*/
-#define DISPATCH_RING_DEQUEUE_PERIOD 1/*2*/
+#define DISPATCH_RING_DEQUEUE_PERIOD 4/*2*/
 
 #ifdef NEW_DISPATCHER
 #define RETURN_RING_BURST_SIZE 64
@@ -70,6 +70,11 @@
 #ifndef QUANTUM_CYCLE
 #define QUANTUM_CYCLE 1000
 #endif
+#ifndef QUANTUM_IC
+#define QUANTUM_IC 9000
+#endif
+
+#define LARGE_QUANTUM 10000000
 
 #define MAKE_IP_ADDR(a, b, c, d)			\
 	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
@@ -102,9 +107,16 @@ typedef struct worker_info
     int wid;
     int version_number;
     int num_running_jobs;
+    #ifdef MSQ
+    int serviced_quanta;
+    #endif
 
     #ifdef NEW_DISPATCHER
+    #ifdef MSQ
+    worker_info(int wid) : rx_mbuf_dispatch_q(nullptr),  work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0), serviced_quanta(0) {}
+    #else
     worker_info(int wid) : rx_mbuf_dispatch_q(nullptr),  work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0) {}
+    #endif
     #else
     worker_info(int wid) : rx_mbuf_dispatch_q(nullptr),  rx_mbuf_return_q(nullptr), work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0) {}
     #endif
@@ -112,6 +124,10 @@ typedef struct worker_info
     friend bool operator< (worker_info const& lhs, worker_info const& rhs) {
     	if(lhs.version_number != rhs.version_number)
     		return lhs.version_number > rhs.version_number;
+	#ifdef MSQ
+	if(lhs.num_running_jobs == rhs.num_running_jobs)
+		return lhs.serviced_quanta < rhs.serviced_quanta;
+	#endif
 	    return lhs.num_running_jobs > rhs.num_running_jobs; // so that it's a min heap
     }
 } worker_info_t;
@@ -207,7 +223,12 @@ public:
 #ifdef NEW_DISPATCHER
 struct cache_filled_size {
 	uint64_t size;
+	#ifdef MSQ
+	uint64_t sq;
+	char cache_line_filler[CACHE_LINE_SIZE - sizeof(uint64_t) - sizeof(uint64_t)];
+	#else
 	char cache_line_filler[CACHE_LINE_SIZE - sizeof(uint64_t)];
+	#endif
 };
 static struct cache_filled_size *curr_sizes;
 #endif
@@ -402,15 +423,18 @@ static uint64_t rdtsc(){
 }
 
 void call_the_yield(long ic) {
-		#ifdef TIME_STAGE
-		time_interval = ic;
-		#endif
-		#ifdef LAS
-		quantum_idx++;
-		if(quantum_idx == num_assigned_quanta)
-			(*curr_yield)(nullptr);
-		#else
-        (*curr_yield)(nullptr);
+	#ifdef TIME_STAGE
+	time_interval = ic;
+	#endif
+	#ifdef LAS
+	quantum_idx++;
+	if(quantum_idx == num_assigned_quanta)
+		(*curr_yield)(nullptr);
+	#else
+	#ifdef TQ_THREAD
+        rte_delay_us_block(1);
+	#endif
+	(*curr_yield)(nullptr);
         #endif
 }
 
@@ -615,7 +639,11 @@ void* worker(void* arg) {
 
     cp_pid = gettid();
     // per thread
-    register_ci_direct(1000/*doesn't matter*/, QUANTUM_CYCLE, call_the_yield);
+    #ifdef FCFS
+    register_ci_direct(LARGE_QUANTUM, LARGE_QUANTUM, call_the_yield);
+    #else
+    register_ci_direct(QUANTUM_IC, QUANTUM_CYCLE, call_the_yield);
+    #endif
 
     struct rte_ring* rx_mbuf_dispatch_q = worker_arg->rx_mbuf_dispatch_q;
     #ifndef NEW_DISPATCHER 
@@ -711,9 +739,15 @@ void* worker(void* arg) {
 		    	#ifdef LAS
 			next_coro->num_quanta += num_assigned_quanta;
 			busy_coros.push(next_coro);
+			#ifdef MSQ
+			curr_sizes[tid].sq += num_assigned_quanta;
+			#endif
 			#else
 			next_coro->num_quanta ++;
 		    	busy_coros.push_back(next_coro);
+			#ifdef MSQ
+                        curr_sizes[tid].sq ++;
+                        #endif
 		    	#endif
 
 			#ifdef RECORD_NUM_PRE
@@ -732,6 +766,9 @@ void* worker(void* arg) {
 		    	idle_coros.push_back(next_coro);
 			#ifdef NEW_DISPATCHER
 			curr_sizes[tid].size++;
+			#ifdef MSQ
+			curr_sizes[tid].sq -= next_coro->num_quanta;
+			#endif
 			#endif
 		    }
 		    #ifdef LAS
@@ -993,8 +1030,18 @@ static int run_server()
 		// efficient way of computing ceil(nb_rx/NUM_WORKER_THREADS)
 		max_dispatch_size = (nb_rx + NUM_WORKER_THREADS - 1) / NUM_WORKER_THREADS;
 		for(i = 0; i < nb_rx; i += max_dispatch_size) {
+			#ifdef RAND_DISP
+			#ifdef POWER_TWO
+			worker_info_t* w1 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
+		        worker_info_t* w2 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
+			tmp_w = (w1->num_running_jobs < w2->num_running_jobs)? w1 : w2; 	
+			#else
+			tmp_w = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
+			#endif
+			#else
 			tmp_w = worker_queue.top();
                         worker_queue.pop();
+			#endif
 			dispatch_size = (i + max_dispatch_size < nb_rx)? max_dispatch_size : nb_rx - i; 
 			nb_return = rte_ring_enqueue_burst(tmp_w->rx_mbuf_dispatch_q, (void **)&rx_bufs[i], dispatch_size, nullptr);
 			
@@ -1004,7 +1051,9 @@ static int run_server()
 				rte_pktmbuf_free_bulk(&rx_bufs[i + nb_return], dispatch_size - nb_return);
 				total_running_jobs += nb_return;
 				tmp_w->num_running_jobs += nb_return;
+				#ifndef RAND_DISP
 				worker_queue.push(tmp_w);
+				#endif
 				//std::cout << "Packet drop: total number of running jobs " << total_running_jobs << std::endl;
 				packet_drop_count++;
 				if(packet_drop_count == 100000) {
@@ -1014,7 +1063,9 @@ static int run_server()
 				continue;	
 			}
 			tmp_w->num_running_jobs += nb_return;
+			#ifndef RAND_DISP
                         worker_queue.push(tmp_w);
+			#endif
                         return_queue_checkin_idx += nb_return;
                         total_running_jobs += nb_return;
 		}		
@@ -1049,6 +1100,9 @@ static int run_server()
 				return_size = curr_size - prev_sizes[tmp_w->wid];
 				prev_sizes[tmp_w->wid] = curr_size;
 				total_return_size += return_size;
+				#ifdef MSQ
+                                tmp_w->serviced_quanta = curr_sizes[tmp_w->wid].sq;
+                                #endif
 				#else
 				return_size = 0;
 				for(;;) {

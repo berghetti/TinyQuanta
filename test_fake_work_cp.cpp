@@ -33,7 +33,7 @@ void simplest_handler(long ic) {
 
 int main()
 {
-	register_ci(1000, 10000, simplest_handler);
+	register_ci(1000, 5000, simplest_handler);
 	unsigned int gseed = rand() % 10000;
 	LastCycleTS = rdtsc();
 	uint64_t start_time, end_time;

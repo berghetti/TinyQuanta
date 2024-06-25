@@ -40,20 +40,20 @@ void scan_db(rocksdb_t *db) {
 	rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
 	
 	uint64_t start = rdtsc();
-	rocksdb_iterator_t *iter = rocksdb_create_iterator(db, readoptions);
+	/*rocksdb_iterator_t *iter = rocksdb_create_iterator(db, readoptions);
 	rocksdb_iter_seek_to_first(iter);
 	while (rocksdb_iter_valid(iter)) {
 		retr_key = rocksdb_iter_key(iter, &klen);
     		rocksdb_iter_next(iter);
   	}
-  	rocksdb_iter_destroy(iter);
-	//rocksdb_scan(db, readoptions);
+  	rocksdb_iter_destroy(iter);*/
+	rocksdb_scan(db, readoptions);
 	uint64_t end = rdtsc();
 	uint64_t time_elapsed = end - start;
 
 	if(sample_count > 0)
         {
-                printf("Average CI interval %ld IC, %ld cycles\n", total_ic/sample_count, total_tsc/sample_count);
+                printf("Average CI interval %ld IC, %ld cycles\n", total_ic/sample_count, time_elapsed/sample_count);
         	printf("Outlier percentage %f%%\n", (float)(100 * outlier_count)/(float)(sample_count + outlier_count));
 	}
 	printf("Average SCAN time %ld us\n", time_elapsed/(uint64_t)(1000 * 2.1));
@@ -102,10 +102,14 @@ void simplest_handler(long ic) {
         //LastCycleTS = rdtsc();
 }
 
+void simplest_handler_cnt(long ic) {
+	sample_count += 1;
+}
+
 int main(int argc, char **argv) {
 
         pin_to_cpu(30);
-        //register_ci(1000/*doesn't matter*/, QUANTUM_CYCLE, simplest_handler);
+        register_ci(9000/*doesn't matter*/, QUANTUM_CYCLE, simplest_handler_cnt);
 
         if(!tsc_buckets)
                 tsc_buckets = (uint64_t*)malloc(BUCKET_SIZE * sizeof(uint64_t));

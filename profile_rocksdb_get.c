@@ -76,8 +76,10 @@ void get_db(rocksdb_t *db) {
                 fwrite(tsc_buckets, sizeof(char), BUCKET_SIZE * sizeof(uint64_t), f);
                 fclose(f);
         }
-        printf("Average number of probes per get %d\n", NumProbes/5000);
-        printf("Average Get time %ld ns\n", time_elapsed/(uint64_t)(5000 * 2.1));
+	//printf("Average number of probes per get %d\n", NumProbes/5000);
+	printf("Average Get time %ld ns\n", time_elapsed/(uint64_t)(5000 * 2.1));
+	printf("Total number of sample counts %d\n", sample_count);
+	//NumProbes = 0;
         /*for (int i = 0; i < 5000; i++) {
                 printf("%f us\n", (float)intervals[i]/(2.6*1000));
         }*/
@@ -129,7 +131,7 @@ void simplest_handler(long ic) {
 int main(int argc, char **argv) {
 
         pin_to_cpu(30);
-        //register_ci(1000/*doesn't matter*/, 1000, simplest_handler);
+        register_ci(1000/*doesn't matter*/, QUANTUM_CYCLE, simplest_handler);
 
         if(!tsc_buckets)
                 tsc_buckets = (uint64_t*)malloc(BUCKET_SIZE * sizeof(uint64_t));
