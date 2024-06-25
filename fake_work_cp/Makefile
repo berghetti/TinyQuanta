@@ -1,7 +1,7 @@
 CFLAGS = -Wno-register -O3 -mtune=intel -DNDEBUG
 
 libfake:
-	$(CC) -c $(CFLAGS) -fPIC fake_work.c
+	$(CC) -c $(CFLAGS) -fPIC fake_work.cpp
 	$(CC) -shared -o libfake.so fake_work.o
 
 clean:
