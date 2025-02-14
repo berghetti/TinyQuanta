@@ -12,7 +12,7 @@ template<> struct Nops<0>{ static inline void generate(){} };
 void fake_work_noop(unsigned int nloops) {
     for (unsigned int i = 0; i++ < nloops;) {
 	//asm volatile("nop");
-	Nops<100>::generate();
+	Nops<300>::generate();
     }
 }
 

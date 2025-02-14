@@ -1,7 +1,7 @@
-ifneq ($(shell command -v llvm-config-9 2> /dev/null),)
-  LLVM_CONFIG = llvm-config-9
-else ifneq ($(shell command -v llvm-config-12 2> /dev/null),)
+ifneq ($(shell command -v llvm-config-12 2> /dev/null),)
   LLVM_CONFIG = llvm-config-12
+else ifneq ($(shell command -v llvm-config-9 2> /dev/null),)
+  LLVM_CONFIG = llvm-config-9
 else ifneq ($(shell command -v llvm-config-11 2> /dev/null),)
   LLVM_CONFIG = llvm-config-11
 else ifneq ($(shell command -v llvm-config-10 2> /dev/null),)

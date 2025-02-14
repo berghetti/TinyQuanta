@@ -12,12 +12,13 @@ endif
 PKGCONF ?= pkg-config
 
 # overwrite the dpdk installed in /opt/mellanox/dpdk/ 
-PKG_CONFIG_PATH = /usr/local/lib/x86_64-linux-gnu/pkgconfig 
+#PKG_CONFIG_PATH = /usr/local/lib/x86_64-linux-gnu/pkgconfig 
+PKG_CONFIG_PATH = ../afp/deps/dpdk/build/lib/x86_64-linux-gnu/pkgconfig
 
 PC_FILE := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --path libdpdk 2>/dev/null)
 CFLAGS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --cflags libdpdk)
 
-LDFLAGS_SHARED = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --libs libdpdk) -lrte_net_mlx5 -lrte_bus_pci -lrte_bus_vdev -lpthread -lm -lstdc++
+LDFLAGS_SHARED = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --libs --static libdpdk) -lrte_net_mlx5 -lrte_bus_pci -lrte_bus_vdev -lpthread -lm -lstdc++
 
 CFLAGS += -DALLOW_EXPERIMENTAL_API -lm -lstdc++
 
@@ -28,11 +29,11 @@ BOOST_LDFLAGS += -lboost_coroutine -lboost_context
 TQ_ROOT = .
 
 # for RocksDB
-CFLAGS += -I $(TQ_ROOT)/RocksDB-TQ/include
-ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie -lbz2 -lzstd
-ROCKSDB_LIB = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_cp.a
-ROCKSDB_LIB_UNINST = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb.a
-ROCKSDB_LIB_CI =  $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_ci.a
+#CFLAGS += -I $(TQ_ROOT)/RocksDB-TQ/include
+#ROCKSDB_LDFLAGS  = -lrt -pthread -lm -lnuma -ldl -lconfig -lgflags -lsnappy -lz -llz4 -ljemalloc  -no-pie -lbz2 -lzstd
+#ROCKSDB_LIB = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_cp.a
+#ROCKSDB_LIB_UNINST = $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb.a
+#ROCKSDB_LIB_CI =  $(TQ_ROOT)/RocksDB-TQ/test_llvm/librocksdb_ci.a
 
 # for CP
 CP_LIB_HOME = $(TQ_ROOT)/CheapPreemptions
