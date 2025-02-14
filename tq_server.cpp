@@ -1167,7 +1167,7 @@ static int run_server() {
         // total_running_jobs << std::endl;
         packet_drop_count++;
         if (packet_drop_count == 100000) {
-          std::cout << "100K packet drops!" << std::endl;
+          //std::cout << "100K packet drops!" << std::endl;
           packet_drop_count = 0;
         }
         continue;
