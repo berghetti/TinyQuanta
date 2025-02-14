@@ -18,7 +18,7 @@
 #include <boost/coroutine2/all.hpp>
 #include <boost/bind.hpp>
 #include <boost/context/stack_context.hpp>
-#include "rocksdb/c.h"
+//#include "rocksdb/c.h"
 #include "ci_lib.h"
 #include <string>
 #include <sys/mman.h> // mmap, munmap
@@ -28,7 +28,10 @@
 #include <csignal>
 #endif
 
-#define NUM_WORKER_THREADS 16
+#define NUM_WORKER_THREADS 14
+
+static uint8_t cpus[NUM_WORKER_THREADS + 1] = {2,4,6,8,10,12,14,16,18,20,22,24,26,28,30};
+
 #ifndef NUM_WORKER_COROS
 #define NUM_WORKER_COROS 8/*4*/
 #endif
@@ -156,6 +159,7 @@ typedef enum job_type {
 typedef struct job_info {
     job_type_t jtype;
     uint32_t key;
+    uint64_t ns_sleep;
     #ifdef SERVER_LAT
     struct rte_rocksdb_hdr *rocksdb_hdr;
     uint64_t job_start_time;
@@ -242,16 +246,16 @@ struct rte_pktmbuf_pool_private_with_start_tsc {
  };
 #endif
 
-static rocksdb_t *db;
+//static rocksdb_t *db;
 
-static unsigned int dpdk_port = 1;
+static unsigned int dpdk_port = 0;
 struct rte_mempool *rx_mbuf_pool;
 struct rte_mempool *tx_mbuf_pool;
 static struct rte_ether_addr my_eth;
 static uint32_t my_ip;
 
 /* parameters */
-static unsigned int server_port = 8001;
+static unsigned int server_port = 6789;
 static unsigned int num_rx_queues = 1;
 static unsigned int num_tx_queues = NUM_WORKER_THREADS;
 
@@ -294,8 +298,8 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool, unsigned int n_rxqueues, 
 {
 	//struct rte_eth_conf port_conf = port_conf_default;
 	struct rte_eth_conf port_conf = {};
-	port_conf.rxmode.offloads = DEV_RX_OFFLOAD_IPV4_CKSUM;
-	port_conf.txmode.offloads = DEV_TX_OFFLOAD_IPV4_CKSUM | DEV_TX_OFFLOAD_UDP_CKSUM;
+	port_conf.rxmode.offloads = RTE_ETH_RX_OFFLOAD_IPV4_CKSUM;
+	port_conf.txmode.offloads = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_TX_OFFLOAD_UDP_CKSUM;
 
 	const uint16_t rx_rings = n_rxqueues, tx_rings = n_txqueues;
 	uint16_t nb_rxd = RX_RING_SIZE;
@@ -402,12 +406,12 @@ static bool check_ip_hdr(const struct rte_mbuf *buf)
 static void pin_to_cpu(int cpu_id) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-	cpu_id = cpu_id + BASE_CPU;
+	//cpu_id = cpu_id + BASE_CPU;
         CPU_SET(cpu_id, &cpuset);
         pthread_t thread = pthread_self();
         int ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-        if(ret == 0)
-            std::cout << "Successfuly pin the current thread to cpu " << cpu_id << std::endl;
+        //if(ret == 0)
+        //    std::cout << "Successfuly pin the current thread to cpu " << cpu_id << std::endl;
 }
 
 static uint64_t rdtsc_w_lfence(){
@@ -446,12 +450,12 @@ void empty_handler(long ic) {
 
 void coro(int coro_id, job_info_t* &jinfo, coro_t::push_type &yield)
 {       
-    std::cout << "[coro]: coro " << coro_id << " is ready!" << std::endl;  
+    //std::cout << "[coro]: coro " << coro_id << " is ready!" << std::endl;  
     /* Suspend here, wait for resume. */
     yield(&yield);
     char *err = nullptr;
     size_t vallen;
-    rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
+    //rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
     char key[10];
     char val[10];
     const char *retr_key;
@@ -459,33 +463,41 @@ void coro(int coro_id, job_info_t* &jinfo, coro_t::push_type &yield)
     #ifdef SERVER_LAT
     uint32_t lat;
     #endif
-
+    
     for(;;) {
-        if(jinfo->jtype == ROCKSDB_GET) {
-        	snprintf(key, 10, "key%d", jinfo->key);
-		rocksdb_get_in_place(db, readoptions, key, strlen(key), val, &vallen, &err);
-        	assert(!err);
-        	assert(strcmp(val, "value") == 0);
-	}  else if (jinfo->jtype == ROCKSDB_SCAN) {
-		rocksdb_scan(db, readoptions);	
-	}  else {
-		#ifdef SYNTHETIC
-		// synthetic workloads
-		// every loop is 6 cycles
-		jinfo->key = fake_work_rand_gen(jinfo->key, jinfo->key * 2.1/6);
-		#else
-		assert(false);
-		#endif
-	}
 
-	#ifdef SERVER_LAT
-	lat = rdtsc() - jinfo->job_start_time;
-        jinfo->rocksdb_hdr->run_ns = rte_cpu_to_be_32(lat);
-	#endif
-    	// TODO: leverage this return value? 
+    //printf("core: %u\n", jinfo->ns_sleep);
+    fake_work_noop(jinfo->ns_sleep);
+
     	yield(&yield);
     }
-    rocksdb_readoptions_destroy(readoptions);
+
+ //   for(;;) {
+ //       if(jinfo->jtype == ROCKSDB_GET) {
+ //       	snprintf(key, 10, "key%d", jinfo->key);
+ // 	//rocksdb_get_in_place(db, readoptions, key, strlen(key), val, &vallen, &err);
+ //       	assert(!err);
+ //       	assert(strcmp(val, "value") == 0);
+ // }  else if (jinfo->jtype == ROCKSDB_SCAN) {
+ // 	//rocksdb_scan(db, readoptions);	
+ // }  else {
+ // 	#ifdef SYNTHETIC
+ // 	// synthetic workloads
+ // 	// every loop is 6 cycles
+ // 	jinfo->key = fake_work_rand_gen(jinfo->key, jinfo->key * 2.1/6);
+ // 	#else
+ // 	assert(false);
+ // 	#endif
+ // }
+
+ // #ifdef SERVER_LAT
+ // lat = rdtsc() - jinfo->job_start_time;
+ //       jinfo->rocksdb_hdr->run_ns = rte_cpu_to_be_32(lat);
+ // #endif
+ //   	// TODO: leverage this return value? 
+ //   	yield(&yield);
+ //   }
+    //rocksdb_readoptions_destroy(readoptions);
 
 }
 
@@ -512,9 +524,15 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro, uint32_t 
 	uint16_t *jtype = rte_pktmbuf_mtod_offset(rx_mbuf, uint16_t *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(uint32_t) );
 	idle_coro->jinfo->jtype = static_cast<job_type>(*jtype);
 	idle_coro->jinfo->input_data = rte_pktmbuf_mtod_offset(rx_mbuf, char *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + sizeof(uint32_t) + sizeof(uint16_t));*/
-	struct rte_rocksdb_hdr *rx_ptr_rocksdb_hdr = rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_rocksdb_hdr *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
-	idle_coro->jinfo->jtype = static_cast<job_type>(rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_type));
-	idle_coro->jinfo->key = rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_size);
+	
+  //struct rte_rocksdb_hdr *rx_ptr_rocksdb_hdr = rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_rocksdb_hdr *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
+	//idle_coro->jinfo->jtype = static_cast<job_type>(rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_type));
+	//idle_coro->jinfo->key = rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_size);
+  
+  uint64_t *data = rte_pktmbuf_mtod_offset(rx_mbuf, uint64_t *, RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
+  //uint32_t type = data[3];
+  uint32_t ns_sleep = data[4];
+  idle_coro->jinfo->ns_sleep = ns_sleep;
 
 	/* headers of tx_mbuf */	
 	//struct rte_mbuf *tx_mbuf = rte_pktmbuf_copy(rx_mbuf, tx_mbuf_pool, 0, UINT32_MAX);
@@ -557,23 +575,30 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro, uint32_t 
 	rte_udp_hdr->dst_port = rx_ptr_udp_hdr->src_port;
 	rte_udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) + sizeof(struct rte_rocksdb_hdr));
 	rte_udp_hdr->dgram_cksum = 0;
-	/* RocksDB header */
-	buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_rocksdb_hdr));
-        rte_rocksdb_hdr = (struct rte_rocksdb_hdr *) buf_ptr;	
-	rte_rocksdb_hdr->id = rx_ptr_rocksdb_hdr->id;
-	rte_rocksdb_hdr->req_type = rx_ptr_rocksdb_hdr->req_type;
-	rte_rocksdb_hdr->req_size = rx_ptr_rocksdb_hdr->req_size;
-	#ifdef SERVER_LAT
-	idle_coro->jinfo->job_start_time = static_cast< struct rte_pktmbuf_pool_private_with_start_tsc* >(rte_mbuf_to_priv(rx_mbuf))->start_tsc;
-	idle_coro->jinfo->rocksdb_hdr = rte_rocksdb_hdr;
-	#else
-	#ifdef QUEUE_SIZE
-	rte_rocksdb_hdr->run_ns = rte_cpu_to_be_32(queue_size);
-	#else
-	rte_rocksdb_hdr->run_ns = 0;
-	#endif
-	#endif
-	//*(uint32_t*)((char*)buf_ptr + sizeof(struct rte_udp_hdr)) = *seq_num;
+	
+  /* ony minimal data to response */
+  char *payload = rte_pktmbuf_append(tx_mbuf, sizeof(uint64_t) * 6);
+  /* copy payload received */
+  rte_memcpy(payload, data, sizeof(uint64_t) * 6);
+	
+  /* RocksDB header */
+	//buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_rocksdb_hdr));
+  //      rte_rocksdb_hdr = (struct rte_rocksdb_hdr *) buf_ptr;	
+	//rte_rocksdb_hdr->id = rx_ptr_rocksdb_hdr->id;
+	//rte_rocksdb_hdr->req_type = rx_ptr_rocksdb_hdr->req_type;
+	//rte_rocksdb_hdr->req_size = rx_ptr_rocksdb_hdr->req_size;
+	//#ifdef SERVER_LAT
+	//idle_coro->jinfo->job_start_time = static_cast< struct rte_pktmbuf_pool_private_with_start_tsc* >(rte_mbuf_to_priv(rx_mbuf))->start_tsc;
+	//idle_coro->jinfo->rocksdb_hdr = rte_rocksdb_hdr;
+	//#else
+	//#ifdef QUEUE_SIZE
+	//rte_rocksdb_hdr->run_ns = rte_cpu_to_be_32(queue_size);
+	//#else
+	//rte_rocksdb_hdr->run_ns = 0;
+	//#endif
+	//#endif
+	
+  //*(uint32_t*)((char*)buf_ptr + sizeof(struct rte_udp_hdr)) = *seq_num;
 	//idle_coro->jinfo->output_data = buf_ptr + sizeof(struct rte_udp_hdr) + sizeof(uint32_t);
 
 	//tx_mbuf->l2_len = RTE_ETHER_HDR_LEN;
@@ -582,60 +607,62 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t* idle_coro, uint32_t 
 
 }
 
-static int rocksdb_init() 
-{
-    rocksdb_options_t *options = rocksdb_options_create();
-    rocksdb_options_set_allow_mmap_reads(options, 1);
-    rocksdb_options_set_allow_mmap_writes(options, 1);
-    rocksdb_slicetransform_t * prefix_extractor = rocksdb_slicetransform_create_capped_prefix(8);
-    rocksdb_options_set_prefix_extractor(options, prefix_extractor);
-    rocksdb_options_set_plain_table_factory(options, 0, 10, 0.75, 3);
-    // Optimize RocksDB. This is the easiest way to
-    // get RocksDB to perform well
-    rocksdb_options_increase_parallelism(options, 0);
-    rocksdb_options_optimize_level_style_compaction(options, 0);
-    // create the DB if it's not already present
-    rocksdb_options_set_create_if_missing(options, 1);
-    // overwrite the default 8MB block cache to support higher concurrency
-    //rocksdb_block_based_table_options_t* block_options = rocksdb_block_based_options_create();
-    
-    //rocksdb_block_based_options_set_block_cache(block_options, rocksdb_cache_create_lru_shard(32 << 20, 8));
-    
-    //rocksdb_options_set_block_based_table_factory(options, block_options);
-    //rocksdb_options_set_table_cache_numshardbits(options, 8);
-    rocksdb_options_set_disable_auto_compactions(options, 1);
-    
-    // open DB
-    char *err = NULL;
-    char DBPath[] = "/tmpfs/experiments/my_db";
-    db = rocksdb_open(options, DBPath, &err);
-    if (err) {
-   	 	printf("Could not open RocksDB database: %s\n", err);
-      	return -1;
-  	}
-    // Put key-value
-  /*rocksdb_writeoptions_t *writeoptions = rocksdb_writeoptions_create();
-  const char *value = "value";
-  for (int i = 0; i < 5000; i++) {
-        char key[10];
-        snprintf(key, 10, "key%d", i);
-        rocksdb_put(db, writeoptions, key, strlen(key), value, strlen(value) + 1,
-                    &err);
-        assert(!err);
-  }
-  assert(!err);
-  rocksdb_writeoptions_destroy(writeoptions);*/
-  return 0;
-}
+//static int rocksdb_init() 
+//{
+//    rocksdb_options_t *options = rocksdb_options_create();
+//    rocksdb_options_set_allow_mmap_reads(options, 1);
+//    rocksdb_options_set_allow_mmap_writes(options, 1);
+//    rocksdb_slicetransform_t * prefix_extractor = rocksdb_slicetransform_create_capped_prefix(8);
+//    rocksdb_options_set_prefix_extractor(options, prefix_extractor);
+//    rocksdb_options_set_plain_table_factory(options, 0, 10, 0.75, 3);
+//    // Optimize RocksDB. This is the easiest way to
+//    // get RocksDB to perform well
+//    rocksdb_options_increase_parallelism(options, 0);
+//    rocksdb_options_optimize_level_style_compaction(options, 0);
+//    // create the DB if it's not already present
+//    rocksdb_options_set_create_if_missing(options, 1);
+//    // overwrite the default 8MB block cache to support higher concurrency
+//    //rocksdb_block_based_table_options_t* block_options = rocksdb_block_based_options_create();
+//    
+//    //rocksdb_block_based_options_set_block_cache(block_options, rocksdb_cache_create_lru_shard(32 << 20, 8));
+//    
+//    //rocksdb_options_set_block_based_table_factory(options, block_options);
+//    //rocksdb_options_set_table_cache_numshardbits(options, 8);
+//    rocksdb_options_set_disable_auto_compactions(options, 1);
+//    
+//    // open DB
+//    char *err = NULL;
+//    char DBPath[] = "/tmpfs/experiments/my_db";
+//    db = rocksdb_open(options, DBPath, &err);
+//    if (err) {
+//   	 	printf("Could not open RocksDB database: %s\n", err);
+//      	return -1;
+//  	}
+//    // Put key-value
+//  /*rocksdb_writeoptions_t *writeoptions = rocksdb_writeoptions_create();
+//  const char *value = "value";
+//  for (int i = 0; i < 5000; i++) {
+//        char key[10];
+//        snprintf(key, 10, "key%d", i);
+//        rocksdb_put(db, writeoptions, key, strlen(key), value, strlen(value) + 1,
+//                    &err);
+//        assert(!err);
+//  }
+//  assert(!err);
+//  rocksdb_writeoptions_destroy(writeoptions);*/
+//  return 0;
+//}
 
 void* worker(void* arg) {
     
-	rte_thread_register();
-	printf("lcore %u running in worker mode. [Ctrl+C to quit]\n", rte_lcore_id());
-
     worker_arg_t* worker_arg = static_cast<worker_arg_t*>(arg);
     int tid = worker_arg->wid;
-    pin_to_cpu(tid + 1);
+
+    //pin_to_cpu(tid + 1);
+    pin_to_cpu(cpus[tid]);
+	rte_thread_register();
+	printf("worker id %d on core %u running in worker mode. [Ctrl+C to quit]\n", tid, sched_getcpu());
+
 
     cp_pid = gettid();
     // per thread
@@ -686,7 +713,7 @@ void* worker(void* arg) {
 
     //uint64_t total_num_quanta = 0, total_execution_cycles = 0, finished_jobs = 0, prev_finished_jobs = 0;
 
-    printf("Worker %d initialize all worker coroutines\n", tid);
+    //printf("Worker %d initialize all worker coroutines\n", tid);
 
     for(int coro_id = 0; coro_id < NUM_WORKER_COROS; coro_id++) {
     	#ifdef STACKS_FROM_HUGEPAGE
@@ -729,12 +756,17 @@ void* worker(void* arg) {
 		    curr_yield = next_coro->yield;
 		    if(next_coro->num_quanta == 0)
 		    	LastCycleTS = rdtsc();
+
+        puts("before");
 		    
 		    // resume next_coro
 		    (*(next_coro->coro))();
+
+        puts("herw2");
 		    
 		    // check whether next_coro finish
 		    if(next_coro->coro->get() == nullptr) {
+            puts("nf");
 		    	// not finished
 		    	#ifdef LAS
 			next_coro->num_quanta += num_assigned_quanta;
@@ -756,6 +788,7 @@ void* worker(void* arg) {
 			#endif
 		    }
 		    else {
+            puts("here");
 		    	// finished 
 		    	return_rx_bufs[return_rx_buf_idx++] = next_coro->rx_mbuf;
 		    	tx_bufs[tx_buf_idx++] = next_coro->tx_mbuf;
@@ -833,13 +866,16 @@ void* worker(void* arg) {
     	#endif
 
 	    /* TX path */
-	    if(force_flush || (flush_index >= TX_DEQUEUE_PERIOD && tx_buf_idx != 0) || tx_buf_idx == TX_QUEUE_BURST_SIZE) {
+	    //if(force_flush || (flush_index >= TX_DEQUEUE_PERIOD && tx_buf_idx != 0) || tx_buf_idx == TX_QUEUE_BURST_SIZE) {
+     //     puts("here");
+     if (tx_buf_idx)
+         printf("%u\n", tx_buf_idx);
 	  		nb_tx = rte_eth_tx_burst(port, tid, tx_bufs, tx_buf_idx);
 	  		if (unlikely(nb_tx != tx_buf_idx))
 				printf("error: worker %d could not transmit all packets: %d %d\n", tid, tx_buf_idx, nb_tx);
-	  		tx_buf_idx = 0;
-			flush_index = 0;
-	    }
+	  //		tx_buf_idx = 0;
+		//	flush_index = 0;
+	  //  }
 
 	    #ifdef TIME_STAGE
     	stage3_end = rdtsc_w_lfence();
@@ -926,9 +962,9 @@ static void signal_callback_handler(int signum) {
  */
 static int run_server()
 {
-	pin_to_cpu(0);
+	pin_to_cpu(cpus[14]); // use last cpu to dispatcher
 
-	printf("lcore %u running in server mode. [Ctrl+C to quit]\n", rte_lcore_id());
+	printf("core %u running in server mode. [Ctrl+C to quit]\n", sched_getcpu());
 
 	pthread_t worker_threads[NUM_WORKER_THREADS];
 	// input arguments to worker pthreads
@@ -1340,7 +1376,7 @@ int main(int argc, char *argv[])
  	stacks = allocate_stacks_from_hugepages();
  	#endif
 
-	rocksdb_init();
+	//rocksdb_init();
 	
 	/* Initialize dpdk. */
 	args_parsed = dpdk_init(argc, argv);
