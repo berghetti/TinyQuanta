@@ -19,13 +19,39 @@
 #include <unistd.h>
 #include <vector>
 //#include "rocksdb/c.h"
+#include <string>
+#include <sys/mman.h>  // mmap, munmap
 #include "ci_lib.h"
 #include "fake_work_cp.h"
-#include <string>
-#include <sys/mman.h> // mmap, munmap
 
 #ifdef RECORD_NUM_PRE
 #include <csignal>
+#endif
+
+#ifdef LEVELDB
+#include <leveldb/c.h>
+
+static leveldb_t *db;
+
+static void
+leveldb_init ( void )
+{
+  // Initialize levelDB
+  leveldb_options_t *options = leveldb_options_create ();
+
+  // open DB
+  char *err = NULL;
+  const char *DBPath = "/tmpfs/my_db";
+  db = leveldb_open ( options, DBPath, &err );
+  if ( err )
+    {
+      fprintf ( stderr,
+                "Error to open database:\n%s\n"
+                "Try: make database from root folder with 'make database'\n",
+                err );
+      exit ( 1 );
+    }
+}
 #endif
 
 #define NUM_WORKER_THREADS 14
@@ -56,17 +82,17 @@ static uint8_t cpus[NUM_WORKER_THREADS + 1] = {2,  4,  6,  8,  10, 12, 14, 16,
 #ifdef NEW_DISPATCHER
 #define RETURN_RING_BURST_SIZE 64
 #define RETURN_RING_CHECKIN_PERIOD_PER_THREAD 8 /*2*/
-#define RETURN_RING_CHECKIN_PERIOD                                             \
-  1 //(NUM_WORKER_THREADS * RETURN_RING_CHECKIN_PERIOD_PER_THREAD)
+#define RETURN_RING_CHECKIN_PERIOD \
+  1  //(NUM_WORKER_THREADS * RETURN_RING_CHECKIN_PERIOD_PER_THREAD)
 #else
 #define RETURN_RING_SIZE 512
 #define RETURN_RING_BURST_SIZE 8
-#define RETURN_RING_CHECKIN_PERIOD                                             \
+#define RETURN_RING_CHECKIN_PERIOD \
   (RETURN_RING_BURST_SIZE * NUM_WORKER_THREADS * 2)
 #define FREE_MBUF_MAX_BATCH_SIZE (RETURN_RING_SIZE * NUM_WORKER_THREADS)
 #endif
 
-#define MAX_NUM_RX_MBUF_PER_THREAD                                             \
+#define MAX_NUM_RX_MBUF_PER_THREAD \
   (DISPATCH_RING_SIZE + NUM_WORKER_COROS + RETURN_RING_BURST_SIZE)
 #define MAX_NUM_TX_MBUF_PER_THREAD (NUM_WORKER_COROS + TX_QUEUE_BURST_SIZE)
 
@@ -83,7 +109,7 @@ static uint8_t cpus[NUM_WORKER_THREADS + 1] = {2,  4,  6,  8,  10, 12, 14, 16,
 
 #define LARGE_QUANTUM 10000000
 
-#define MAKE_IP_ADDR(a, b, c, d)                                               \
+#define MAKE_IP_ADDR(a, b, c, d) \
   (((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | (uint32_t)d)
 
 #ifndef BASE_CPU
@@ -93,22 +119,22 @@ static uint8_t cpus[NUM_WORKER_THREADS + 1] = {2,  4,  6,  8,  10, 12, 14, 16,
 #define CACHE_LINE_SIZE 64
 
 typedef struct worker_arg {
-  struct rte_ring *rx_mbuf_dispatch_q;
+  struct rte_ring* rx_mbuf_dispatch_q;
 #ifndef NEW_DISPATCHER
-  struct rte_ring *rx_mbuf_return_q;
+  struct rte_ring* rx_mbuf_return_q;
 #endif
 #ifdef STACKS_FROM_HUGEPAGE
-  char *stack_pool;
+  char* stack_pool;
 #endif
   int wid;
 } worker_arg_t;
 
 typedef struct worker_info {
-  struct rte_ring *rx_mbuf_dispatch_q;
+  struct rte_ring* rx_mbuf_dispatch_q;
 #ifndef NEW_DISPATCHER
-  struct rte_ring *rx_mbuf_return_q;
+  struct rte_ring* rx_mbuf_return_q;
 #endif
-  pthread_t *work_thread;
+  pthread_t* work_thread;
   int wid;
   int version_number;
   int num_running_jobs;
@@ -119,21 +145,31 @@ typedef struct worker_info {
 #ifdef NEW_DISPATCHER
 #ifdef MSQ
   worker_info(int wid)
-      : rx_mbuf_dispatch_q(nullptr), work_thread(nullptr), wid(wid),
-        version_number(0), num_running_jobs(0), serviced_quanta(0) {}
+      : rx_mbuf_dispatch_q(nullptr),
+        work_thread(nullptr),
+        wid(wid),
+        version_number(0),
+        num_running_jobs(0),
+        serviced_quanta(0) {}
 #else
   worker_info(int wid)
-      : rx_mbuf_dispatch_q(nullptr), work_thread(nullptr), wid(wid),
-        version_number(0), num_running_jobs(0) {}
+      : rx_mbuf_dispatch_q(nullptr),
+        work_thread(nullptr),
+        wid(wid),
+        version_number(0),
+        num_running_jobs(0) {}
 #endif
 #else
   worker_info(int wid)
-      : rx_mbuf_dispatch_q(nullptr), rx_mbuf_return_q(nullptr),
-        work_thread(nullptr), wid(wid), version_number(0), num_running_jobs(0) {
-  }
+      : rx_mbuf_dispatch_q(nullptr),
+        rx_mbuf_return_q(nullptr),
+        work_thread(nullptr),
+        wid(wid),
+        version_number(0),
+        num_running_jobs(0) {}
 #endif
 
-  friend bool operator<(worker_info const &lhs, worker_info const &rhs) {
+  friend bool operator<(worker_info const& lhs, worker_info const& rhs) {
     if (lhs.version_number != rhs.version_number)
       return lhs.version_number > rhs.version_number;
 #ifdef MSQ
@@ -141,55 +177,63 @@ typedef struct worker_info {
       return lhs.serviced_quanta < rhs.serviced_quanta;
 #endif
     return lhs.num_running_jobs >
-           rhs.num_running_jobs; // so that it's a min heap
+           rhs.num_running_jobs;  // so that it's a min heap
   }
 } worker_info_t;
 
-bool worker_info_ptr_cmp(const worker_info_t *ptr1, const worker_info_t *ptr2) {
+bool worker_info_ptr_cmp(const worker_info_t* ptr1, const worker_info_t* ptr2) {
   return *ptr1 < *ptr2;
 }
 
-typedef boost::coroutines2::coroutine<void *> coro_t;
+typedef boost::coroutines2::coroutine<void*> coro_t;
 // job type
 typedef enum job_type {
-  ROCKSDB_GET = 0xA,
-  ROCKSDB_SCAN,
-  EB_SHORT,
-  EB_LONG,
-  HB_SHORT,
-  HB_LONG,
-  TPC_P,
-  TPC_O,
-  TPC_N,
-  TPC_D,
-  TPC_S,
-  EXP
+  GET = 1,
+  SCAN,
+  //PUT,
+  //ROCKSDB_GET,
+  //ROCKSDB_SCAN,
+  //EB_SHORT,
+  //EB_LONG,
+  //HB_SHORT,
+  //HB_LONG,
+  //TPC_P,
+  //TPC_O,
+  //TPC_N,
+  //TPC_D,
+  //TPC_S,
+  //EXP
 } job_type_t;
 // job info passed to worker coroutine
 typedef struct job_info {
   job_type_t jtype;
-  uint32_t key;
+  uint64_t key;
   uint64_t ns_sleep;
 #ifdef SERVER_LAT
-  struct rte_rocksdb_hdr *rocksdb_hdr;
+  struct rte_rocksdb_hdr* rocksdb_hdr;
   uint64_t job_start_time;
 #endif
 } job_info_t;
 
 typedef struct coro_info {
-  coro_t::pull_type *coro;
-  coro_t::push_type *yield;
-  job_info_t *jinfo;
-  struct rte_mbuf *rx_mbuf;
-  struct rte_mbuf *tx_mbuf;
+  coro_t::pull_type* coro;
+  coro_t::push_type* yield;
+  job_info_t* jinfo;
+  struct rte_mbuf* rx_mbuf;
+  struct rte_mbuf* tx_mbuf;
   uint32_t num_quanta;
   uint64_t execution_time;
   coro_info()
-      : coro(nullptr), yield(nullptr), jinfo(nullptr), rx_mbuf(nullptr),
-        tx_mbuf(nullptr), num_quanta(0), execution_time(0) {}
+      : coro(nullptr),
+        yield(nullptr),
+        jinfo(nullptr),
+        rx_mbuf(nullptr),
+        tx_mbuf(nullptr),
+        num_quanta(0),
+        execution_time(0) {}
 #ifdef LAS
-  friend bool operator<(coro_info const &lhs, coro_info const &rhs) {
-    return lhs.num_quanta > rhs.num_quanta; // so that it's a min heap
+  friend bool operator<(coro_info const& lhs, coro_info const& rhs) {
+    return lhs.num_quanta > rhs.num_quanta;  // so that it's a min heap
   }
 #endif
 } coro_info_t;
@@ -202,35 +246,35 @@ struct rte_rocksdb_hdr {
 };
 
 #ifdef LAS
-bool coro_info_ptr_cmp(const coro_info_t *ptr1, const coro_info_t *ptr2) {
+bool coro_info_ptr_cmp(const coro_info_t* ptr1, const coro_info_t* ptr2) {
   return *ptr1 < *ptr2;
 }
 #endif
 
 class SimpleStack {
-private:
+ private:
   std::size_t size_;
 
-public:
+ public:
   SimpleStack(std::size_t size = STACK_SIZE) BOOST_NOEXCEPT_OR_NOTHROW
       : size_(size) {}
 
   boost::context::stack_context allocate() {
-    void *vp = rte_malloc(nullptr, size_, 0);
+    void* vp = rte_malloc(nullptr, size_, 0);
     if (!vp) {
       throw std::bad_alloc();
     }
     boost::context::stack_context sctx;
     sctx.size = size_;
-    sctx.sp = static_cast<char *>(vp) + sctx.size;
+    sctx.sp = static_cast<char*>(vp) + sctx.size;
     return sctx;
   }
 
-  void
-  deallocate(boost::context::stack_context &sctx) BOOST_NOEXCEPT_OR_NOTHROW {
+  void deallocate(boost::context::stack_context& sctx)
+      BOOST_NOEXCEPT_OR_NOTHROW {
     BOOST_ASSERT(sctx.sp);
     // don't need to do anything, dispatcher is gonna free it
-    void *vp = static_cast<char *>(sctx.sp) - sctx.size;
+    void* vp = static_cast<char*>(sctx.sp) - sctx.size;
     rte_free(vp);
   }
 };
@@ -245,7 +289,7 @@ struct cache_filled_size {
   char cache_line_filler[CACHE_LINE_SIZE - sizeof(uint64_t)];
 #endif
 };
-static struct cache_filled_size *curr_sizes;
+static struct cache_filled_size* curr_sizes;
 #endif
 
 #ifdef SERVER_LAT
@@ -260,8 +304,8 @@ struct rte_pktmbuf_pool_private_with_start_tsc {
 // static rocksdb_t *db;
 
 static unsigned int dpdk_port = 0;
-struct rte_mempool *rx_mbuf_pool;
-struct rte_mempool *tx_mbuf_pool;
+struct rte_mempool* rx_mbuf_pool;
+struct rte_mempool* tx_mbuf_pool;
 static struct rte_ether_addr my_eth;
 static uint32_t my_ip;
 
@@ -278,7 +322,7 @@ static struct cache_filled_size num_pres[NUM_WORKER_THREADS];
 
 //__thread uint64_t get_start_time, get_end_time;
 
-__thread coro_t::push_type *curr_yield;
+__thread coro_t::push_type* curr_yield;
 
 #ifdef LAS
 __thread uint32_t quantum_idx = 0;
@@ -286,10 +330,10 @@ __thread uint32_t num_assigned_quanta = 1;
 #endif
 
 #ifdef STACKS_FROM_HUGEPAGE
-char *stacks;
+char* stacks;
 #endif
 
-static int str_to_ip(const char *str, uint32_t *addr) {
+static int str_to_ip(const char* str, uint32_t* addr) {
   uint8_t a, b, c, d;
   if (sscanf(str, "%hhu.%hhu.%hhu.%hhu", &a, &b, &c, &d) != 4) {
     return -EINVAL;
@@ -303,7 +347,7 @@ static int str_to_ip(const char *str, uint32_t *addr) {
  * Initializes a given port using global settings and with the RX buffers
  * coming from the mbuf_pool passed as a parameter.
  */
-static inline int port_init(uint8_t port, struct rte_mempool *mbuf_pool,
+static inline int port_init(uint8_t port, struct rte_mempool* mbuf_pool,
                             unsigned int n_rxqueues, unsigned int n_txqueues) {
   // struct rte_eth_conf port_conf = port_conf_default;
   struct rte_eth_conf port_conf = {};
@@ -317,29 +361,25 @@ static inline int port_init(uint8_t port, struct rte_mempool *mbuf_pool,
   int retval;
   uint16_t q;
   struct rte_eth_dev_info dev_info;
-  struct rte_eth_txconf *txconf;
+  struct rte_eth_txconf* txconf;
 
   printf("initializing with %u RX queues and %u TX queues\n", n_rxqueues,
          n_txqueues);
 
-  if (!rte_eth_dev_is_valid_port(port))
-    return -1;
+  if (!rte_eth_dev_is_valid_port(port)) return -1;
 
   /* Configure the Ethernet device. */
   retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
-  if (retval != 0)
-    return retval;
+  if (retval != 0) return retval;
 
   retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
-  if (retval != 0)
-    return retval;
+  if (retval != 0) return retval;
 
   /* Allocate and set up 1 RX queue per Ethernet port. */
   for (q = 0; q < rx_rings; q++) {
     retval = rte_eth_rx_queue_setup(
         port, q, nb_rxd, rte_eth_dev_socket_id(port), NULL, mbuf_pool);
-    if (retval < 0)
-      return retval;
+    if (retval < 0) return retval;
   }
 
   /* Enable TX offloading */
@@ -350,14 +390,12 @@ static inline int port_init(uint8_t port, struct rte_mempool *mbuf_pool,
   for (q = 0; q < tx_rings; q++) {
     retval = rte_eth_tx_queue_setup(port, q, nb_txd,
                                     rte_eth_dev_socket_id(port), txconf);
-    if (retval < 0)
-      return retval;
+    if (retval < 0) return retval;
   }
 
   /* Start the Ethernet port. */
   retval = rte_eth_dev_start(port);
-  if (retval < 0)
-    return retval;
+  if (retval < 0) return retval;
 
   /* Display the port MAC address. */
   rte_eth_macaddr_get(port, &my_eth);
@@ -377,10 +415,10 @@ static inline int port_init(uint8_t port, struct rte_mempool *mbuf_pool,
  * Validate this ethernet header. Return true if this packet is for higher
  * layers, false otherwise.
  */
-static bool check_eth_hdr(const struct rte_mbuf *buf) {
-  struct rte_ether_hdr *ptr_mac_hdr;
+static bool check_eth_hdr(const struct rte_mbuf* buf) {
+  struct rte_ether_hdr* ptr_mac_hdr;
 
-  ptr_mac_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr *);
+  ptr_mac_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr*);
   if (!rte_is_same_ether_addr(&ptr_mac_hdr->dst_addr, &my_eth)) {
     /* packet not to our ethernet addr */
     return false;
@@ -397,11 +435,11 @@ static bool check_eth_hdr(const struct rte_mbuf *buf) {
  * Return true if this IP packet is to us and contains a UDP packet,
  * false otherwise.
  */
-static bool check_ip_hdr(const struct rte_mbuf *buf) {
-  struct rte_ipv4_hdr *ipv4_hdr;
+static bool check_ip_hdr(const struct rte_mbuf* buf) {
+  struct rte_ipv4_hdr* ipv4_hdr;
 
   ipv4_hdr =
-      rte_pktmbuf_mtod_offset(buf, struct rte_ipv4_hdr *, RTE_ETHER_HDR_LEN);
+      rte_pktmbuf_mtod_offset(buf, struct rte_ipv4_hdr*, RTE_ETHER_HDR_LEN);
   if (ipv4_hdr->dst_addr != rte_cpu_to_be_32(my_ip) ||
       ipv4_hdr->next_proto_id != IPPROTO_UDP)
     return false;
@@ -426,9 +464,10 @@ static void pin_to_cpu(int cpu_id) {
 
 static uint64_t rdtsc_w_lfence() {
   unsigned int lo, hi;
-  __asm__ __volatile__("lfence\n\t"
-                       "rdtsc"
-                       : "=a"(lo), "=d"(hi));
+  __asm__ __volatile__(
+      "lfence\n\t"
+      "rdtsc"
+      : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
 
@@ -444,8 +483,7 @@ void call_the_yield(long ic) {
 #endif
 #ifdef LAS
   quantum_idx++;
-  if (quantum_idx == num_assigned_quanta)
-    (*curr_yield)(nullptr);
+  if (quantum_idx == num_assigned_quanta) (*curr_yield)(nullptr);
 #else
 #ifdef TQ_THREAD
   rte_delay_us_block(1);
@@ -460,25 +498,77 @@ void empty_handler(long ic) {
   return;
 }
 
-void coro(int coro_id, job_info_t *&jinfo, coro_t::push_type &yield) {
+#ifdef LEVELDB
+static void
+do_get ( char *key )
+{
+  size_t len;
+  char *value, *err = NULL;
+
+  leveldb_readoptions_t *readoptions = leveldb_readoptions_create ();
+
+  value = leveldb_get ( db, readoptions, key, strlen ( key ), &len, &err );
+  free ( value );
+  free ( err );
+
+  leveldb_readoptions_destroy ( readoptions );
+}
+
+static void
+do_scan ( void )
+{
+  const char *retr_key;
+  size_t len;
+
+  leveldb_readoptions_t *readoptions = leveldb_readoptions_create ();
+  leveldb_iterator_t *iter = leveldb_create_iterator ( db, readoptions );
+        
+  leveldb_iter_seek_to_first ( iter );
+  while ( leveldb_iter_valid ( iter ) )
+    {
+      retr_key = leveldb_iter_key ( iter, &len );
+      ( void ) retr_key;
+      leveldb_iter_next ( iter );
+    }
+        
+  leveldb_iter_destroy ( iter );
+  leveldb_readoptions_destroy ( readoptions );
+}
+#endif
+
+
+void coro(int coro_id, job_info_t*& jinfo, coro_t::push_type& yield) {
   // std::cout << "[coro]: coro " << coro_id << " is ready!" << std::endl;
   /* Suspend here, wait for resume. */
   yield(&yield);
-  char *err = nullptr;
+  char* err = nullptr;
   size_t vallen;
   // rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
   char key[10];
   char val[10];
-  const char *retr_key;
+  const char* retr_key;
   size_t klen;
 #ifdef SERVER_LAT
   uint32_t lat;
 #endif
 
   for (;;) {
-
-    // printf("core: %u\n", jinfo->ns_sleep);
+#ifdef LEVELDB
+    //printf("%d %s\n", jinfo->jtype, (char *)&jinfo->key);
+    switch(jinfo->jtype)
+    {
+      case GET:
+        do_get((char *) &(jinfo->key));
+          break;
+      case SCAN:
+        do_scan();
+        break;
+    }
+#else
+    //printf("core: %u\n", jinfo->ns_sleep);
     fake_work_ns(jinfo->ns_sleep);
+#endif
+    
 
     yield(&yield);
   }
@@ -512,14 +602,13 @@ void coro(int coro_id, job_info_t *&jinfo, coro_t::push_type &yield) {
   // rocksdb_readoptions_destroy(readoptions);
 }
 
-static bool is_rx_mbuf_valid(const struct rte_mbuf *rx_mbuf) {
+static bool is_rx_mbuf_valid(const struct rte_mbuf* rx_mbuf) {
   // TODO: add UDP check
   return check_eth_hdr(rx_mbuf) && check_ip_hdr(rx_mbuf);
 }
 
-void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
+void process_rx_mbuf(struct rte_mbuf* rx_mbuf, coro_info_t* idle_coro,
                      uint32_t queue_size = 0) {
-
   // printf("Packet processed!\n");
   /*struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
   assert(tx_mbuf!= nullptr);
@@ -528,12 +617,12 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
   idle_coro->num_quanta = 0;
 
   /* headers from rx_mbuf */
-  struct rte_ether_hdr *rx_ptr_mac_hdr =
-      rte_pktmbuf_mtod(rx_mbuf, struct rte_ether_hdr *);
-  struct rte_ipv4_hdr *rx_ptr_ipv4_hdr = rte_pktmbuf_mtod_offset(
-      rx_mbuf, struct rte_ipv4_hdr *, RTE_ETHER_HDR_LEN);
-  struct rte_udp_hdr *rx_ptr_udp_hdr =
-      rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_udp_hdr *,
+  struct rte_ether_hdr* rx_ptr_mac_hdr =
+      rte_pktmbuf_mtod(rx_mbuf, struct rte_ether_hdr*);
+  struct rte_ipv4_hdr* rx_ptr_ipv4_hdr =
+      rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_ipv4_hdr*, RTE_ETHER_HDR_LEN);
+  struct rte_udp_hdr* rx_ptr_udp_hdr =
+      rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_udp_hdr*,
                               RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
   // TODO: fix this
   /*uint32_t *seq_num = rte_pktmbuf_mtod_offset(rx_mbuf, uint32_t *,
@@ -546,36 +635,40 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
   sizeof(uint32_t) + sizeof(uint16_t));*/
 
   // struct rte_rocksdb_hdr *rx_ptr_rocksdb_hdr =
-  // rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_rocksdb_hdr *, RTE_ETHER_HDR_LEN
+  // rte_pktmbuf_mtod_offset(rx_mbuf, struct rte_rocksdb_hdr *,
+  // RTE_ETHER_HDR_LEN
   // + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
   // idle_coro->jinfo->jtype =
   // static_cast<job_type>(rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_type));
   // idle_coro->jinfo->key = rte_be_to_cpu_32(rx_ptr_rocksdb_hdr->req_size);
 
-  uint64_t *data =
-      rte_pktmbuf_mtod_offset(rx_mbuf, uint64_t *,
+  uint64_t* data =
+      rte_pktmbuf_mtod_offset(rx_mbuf, uint64_t*,
                               RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr) +
                                   sizeof(struct rte_udp_hdr));
-  // uint32_t type = data[3];
-  uint32_t ns_sleep = data[4];
-  idle_coro->jinfo->ns_sleep = ns_sleep;
+#ifdef LEVELDB
+  idle_coro->jinfo->jtype = (job_type_t)data[3];
+  idle_coro->jinfo->key = data[5];
+#else
+  idle_coro->jinfo->ns_sleep = data[4];
+#endif
 
   /* headers of tx_mbuf */
   // struct rte_mbuf *tx_mbuf = rte_pktmbuf_copy(rx_mbuf, tx_mbuf_pool, 0,
   // UINT32_MAX);
-  struct rte_mbuf *tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
+  struct rte_mbuf* tx_mbuf = rte_pktmbuf_alloc(tx_mbuf_pool);
   assert(tx_mbuf != nullptr);
   idle_coro->tx_mbuf = tx_mbuf;
 
-  char *buf_ptr;
-  struct rte_ether_hdr *eth_hdr;
-  struct rte_ipv4_hdr *ipv4_hdr;
-  struct rte_udp_hdr *rte_udp_hdr;
-  struct rte_rocksdb_hdr *rte_rocksdb_hdr;
+  char* buf_ptr;
+  struct rte_ether_hdr* eth_hdr;
+  struct rte_ipv4_hdr* ipv4_hdr;
+  struct rte_udp_hdr* rte_udp_hdr;
+  struct rte_rocksdb_hdr* rte_rocksdb_hdr;
 
   /* ethernet header */
   buf_ptr = rte_pktmbuf_append(tx_mbuf, RTE_ETHER_HDR_LEN);
-  eth_hdr = (struct rte_ether_hdr *)buf_ptr;
+  eth_hdr = (struct rte_ether_hdr*)buf_ptr;
 
   rte_ether_addr_copy(&my_eth, &eth_hdr->src_addr);
   rte_ether_addr_copy(&rx_ptr_mac_hdr->src_addr, &eth_hdr->dst_addr);
@@ -583,7 +676,7 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
 
   /* IPv4 header */
   buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_ipv4_hdr));
-  ipv4_hdr = (struct rte_ipv4_hdr *)buf_ptr;
+  ipv4_hdr = (struct rte_ipv4_hdr*)buf_ptr;
   ipv4_hdr->version_ihl = 0x45;
   ipv4_hdr->type_of_service = 0;
   ipv4_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) +
@@ -599,7 +692,7 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
 
   /* UDP header */
   buf_ptr = rte_pktmbuf_append(tx_mbuf, sizeof(struct rte_udp_hdr));
-  rte_udp_hdr = (struct rte_udp_hdr *)buf_ptr;
+  rte_udp_hdr = (struct rte_udp_hdr*)buf_ptr;
   rte_udp_hdr->src_port = rte_cpu_to_be_16(server_port);
   rte_udp_hdr->dst_port = rx_ptr_udp_hdr->src_port;
   rte_udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) +
@@ -607,7 +700,7 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
   rte_udp_hdr->dgram_cksum = 0;
 
   /* ony minimal data to response */
-  char *payload = rte_pktmbuf_append(tx_mbuf, sizeof(uint64_t) * 6);
+  char* payload = rte_pktmbuf_append(tx_mbuf, sizeof(uint64_t) * 6);
   /* copy payload received */
   rte_memcpy(payload, data, sizeof(uint64_t) * 6);
 
@@ -684,9 +777,8 @@ void process_rx_mbuf(struct rte_mbuf *rx_mbuf, coro_info_t *idle_coro,
 //  return 0;
 //}
 
-void *worker(void *arg) {
-
-  worker_arg_t *worker_arg = static_cast<worker_arg_t *>(arg);
+void* worker(void* arg) {
+  worker_arg_t* worker_arg = static_cast<worker_arg_t*>(arg);
   int tid = worker_arg->wid;
 
   // pin_to_cpu(tid + 1);
@@ -703,25 +795,25 @@ void *worker(void *arg) {
   register_ci_direct(QUANTUM_IC, QUANTUM_CYCLE, call_the_yield);
 #endif
 
-  struct rte_ring *rx_mbuf_dispatch_q = worker_arg->rx_mbuf_dispatch_q;
+  struct rte_ring* rx_mbuf_dispatch_q = worker_arg->rx_mbuf_dispatch_q;
 #ifndef NEW_DISPATCHER
-  struct rte_ring *rx_mbuf_return_q = worker_arg->rx_mbuf_return_q;
+  struct rte_ring* rx_mbuf_return_q = worker_arg->rx_mbuf_return_q;
 #endif
 #ifdef STACKS_FROM_HUGEPAGE
-  char *stack_pool = worker_arg->stack_pool;
+  char* stack_pool = worker_arg->stack_pool;
 #endif
-  struct rte_mbuf **rx_bufs = static_cast<struct rte_mbuf **>(
-      rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(struct rte_mbuf *), 0));
-  struct rte_mbuf **return_rx_bufs = static_cast<struct rte_mbuf **>(rte_malloc(
-      nullptr, RETURN_RING_BURST_SIZE * sizeof(struct rte_mbuf *), 0));
-  struct rte_mbuf **tx_bufs = static_cast<struct rte_mbuf **>(
-      rte_malloc(nullptr, TX_QUEUE_BURST_SIZE * sizeof(struct rte_mbuf *), 0));
+  struct rte_mbuf** rx_bufs = static_cast<struct rte_mbuf**>(
+      rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(struct rte_mbuf*), 0));
+  struct rte_mbuf** return_rx_bufs = static_cast<struct rte_mbuf**>(rte_malloc(
+      nullptr, RETURN_RING_BURST_SIZE * sizeof(struct rte_mbuf*), 0));
+  struct rte_mbuf** tx_bufs = static_cast<struct rte_mbuf**>(
+      rte_malloc(nullptr, TX_QUEUE_BURST_SIZE * sizeof(struct rte_mbuf*), 0));
 
-  coro_t::pull_type *worker_coros = static_cast<coro_t::pull_type *>(
+  coro_t::pull_type* worker_coros = static_cast<coro_t::pull_type*>(
       rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(coro_t::pull_type), 0));
-  coro_info_t *worker_coro_infos = static_cast<coro_info_t *>(
+  coro_info_t* worker_coro_infos = static_cast<coro_info_t*>(
       rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(coro_info_t), 0));
-  job_info_t *job_infos = static_cast<job_info *>(
+  job_info_t* job_infos = static_cast<job_info*>(
       rte_malloc(nullptr, NUM_WORKER_COROS * sizeof(job_info_t), 0));
 
   uint16_t num_rx_buf, nb_tx, nb_return;
@@ -731,16 +823,16 @@ void *worker(void *arg) {
   bool force_flush, force_dispatch;
   uint8_t port = dpdk_port;
   coro_info_t *idle_coro, next_coro;
-  std::vector<coro_info_t *> idle_coros;
+  std::vector<coro_info_t*> idle_coros;
   idle_coros.reserve(NUM_WORKER_COROS);
 
 // flexibility in which end to use
 #ifdef LAS
-  std::priority_queue<coro_info_t *, std::vector<coro_info_t *>,
+  std::priority_queue<coro_info_t*, std::vector<coro_info_t*>,
                       decltype(&coro_info_ptr_cmp)>
       busy_coros(coro_info_ptr_cmp);
 #else
-  std::deque<coro_info_t *> busy_coros;
+  std::deque<coro_info_t*> busy_coros;
 #endif
 
 #ifdef TIME_STAGE
@@ -770,7 +862,7 @@ void *worker(void *arg) {
 #endif
     worker_coro_infos[coro_id].coro = &worker_coros[coro_id];
     worker_coro_infos[coro_id].yield =
-        static_cast<coro_t::push_type *>(worker_coros[coro_id].get());
+        static_cast<coro_t::push_type*>(worker_coros[coro_id].get());
     worker_coro_infos[coro_id].jinfo = &job_infos[coro_id];
   }
 
@@ -788,9 +880,8 @@ void *worker(void *arg) {
     force_dispatch = false;
 
     if (!busy_coros.empty()) {
-
 #ifdef LAS
-      coro_info_t *next_coro = busy_coros.top();
+      coro_info_t* next_coro = busy_coros.top();
       busy_coros.pop();
       num_assigned_quanta =
           busy_coros.top()->num_quanta - next_coro->num_quanta + 1;
@@ -800,13 +891,12 @@ void *worker(void *arg) {
               : DISPATCH_RING_DEQUEUE_PERIOD - dispatch_index;
       quantum_idx = 0;
 #else
-      coro_info_t *next_coro = busy_coros.front();
+      coro_info_t* next_coro = busy_coros.front();
       busy_coros.pop_front();
 #endif
       // set the yield function
       curr_yield = next_coro->yield;
-      if (next_coro->num_quanta == 0)
-        LastCycleTS = rdtsc();
+      if (next_coro->num_quanta == 0) LastCycleTS = rdtsc();
 
       // resume next_coro
       (*(next_coro->coro))();
@@ -869,7 +959,7 @@ void *worker(void *arg) {
     if (force_dispatch || (dispatch_index >= DISPATCH_RING_DEQUEUE_PERIOD &&
                            !idle_coros.empty())) {
       // get new jobs if (1) there are idle cores and (2) dequeue_period is up
-      num_rx_buf = rte_ring_dequeue_burst(rx_mbuf_dispatch_q, (void **)rx_bufs,
+      num_rx_buf = rte_ring_dequeue_burst(rx_mbuf_dispatch_q, (void**)rx_bufs,
                                           idle_coros.size(), nullptr);
 #ifdef QUEUE_SIZE
       queue_size = busy_coros.size();
@@ -912,15 +1002,15 @@ void *worker(void *arg) {
 #endif
 
     /* TX path */
-     if(force_flush || (flush_index >= TX_DEQUEUE_PERIOD && tx_buf_idx != 0)
-     || tx_buf_idx == TX_QUEUE_BURST_SIZE) {
-        nb_tx = rte_eth_tx_burst(port, tid, tx_bufs, tx_buf_idx);
-        if (unlikely(nb_tx != tx_buf_idx))
-          printf("error: worker %d could not transmit all packets: %d %d\n", tid,
-             tx_buf_idx, nb_tx);
-      		tx_buf_idx = 0;
-      	flush_index = 0;
-        }
+    if (force_flush || (flush_index >= TX_DEQUEUE_PERIOD && tx_buf_idx != 0) ||
+        tx_buf_idx == TX_QUEUE_BURST_SIZE) {
+      nb_tx = rte_eth_tx_burst(port, tid, tx_bufs, tx_buf_idx);
+      if (unlikely(nb_tx != tx_buf_idx))
+        printf("error: worker %d could not transmit all packets: %d %d\n", tid,
+               tx_buf_idx, nb_tx);
+      tx_buf_idx = 0;
+      flush_index = 0;
+    }
 
 #ifdef TIME_STAGE
     stage3_end = rdtsc_w_lfence();
@@ -931,9 +1021,8 @@ void *worker(void *arg) {
 #ifdef NEW_DISPATCHER
       rte_pktmbuf_free_bulk(return_rx_bufs, return_rx_buf_idx);
 #else
-      nb_return =
-          rte_ring_enqueue_burst(rx_mbuf_return_q, (void **)return_rx_bufs,
-                                 return_rx_buf_idx, nullptr);
+      nb_return = rte_ring_enqueue_burst(
+          rx_mbuf_return_q, (void**)return_rx_bufs, return_rx_buf_idx, nullptr);
       if (unlikely(nb_return != return_rx_buf_idx)) {
         printf("error: worker %d could not return all rx-mbufs: %d %d\n", tid,
                return_rx_buf_idx, nb_return);
@@ -981,8 +1070,8 @@ static size_t round_to_huge_page_size(size_t n) {
 }
 
 #ifdef STACKS_FROM_HUGEPAGE
-static char *allocate_stacks_from_hugepages() {
-  char *p = static_cast<char *>(
+static char* allocate_stacks_from_hugepages() {
+  char* p = static_cast<char*>(
       mmap(nullptr,
            round_to_huge_page_size(NUM_WORKER_THREADS * NUM_WORKER_COROS *
                                    STACK_SIZE),
@@ -995,7 +1084,7 @@ static char *allocate_stacks_from_hugepages() {
   return p;
 }
 
-static void deallocate_stacks(char *stacks) {
+static void deallocate_stacks(char* stacks) {
   munmap(stacks, round_to_huge_page_size(NUM_WORKER_THREADS * NUM_WORKER_COROS *
                                          STACK_SIZE));
 }
@@ -1018,7 +1107,7 @@ static void signal_callback_handler(int signum) {
  * Run an echo server
  */
 static int run_server() {
-  pin_to_cpu(cpus[14]); // use last cpu to dispatcher
+  pin_to_cpu(cpus[14]);  // use last cpu to dispatcher
 
   printf("core %u running in server mode. [Ctrl+C to quit]\n", sched_getcpu());
 
@@ -1053,7 +1142,7 @@ static int run_server() {
   uint64_t prev_sizes[NUM_WORKER_THREADS] = {0};
   /* allocate space for curr sizes of workers */
   assert(sizeof(struct cache_filled_size) == CACHE_LINE_SIZE);
-  curr_sizes = static_cast<struct cache_filled_size *>(
+  curr_sizes = static_cast<struct cache_filled_size*>(
       rte_malloc(nullptr, NUM_WORKER_THREADS * sizeof(struct cache_filled_size),
                  CACHE_LINE_SIZE));
   for (int wid = 0; wid < NUM_WORKER_THREADS; wid++) {
@@ -1081,22 +1170,22 @@ static int run_server() {
     worker_args[wid].rx_mbuf_return_q = worker_info_vec[wid].rx_mbuf_return_q;
 #endif
     pthread_create(&worker_threads[wid], nullptr, *worker,
-                   static_cast<void *>(&worker_args[wid]));
+                   static_cast<void*>(&worker_args[wid]));
     worker_info_vec[wid].work_thread = &worker_threads[wid];
   }
 
   // a min heap of worker info ptr
-  std::priority_queue<worker_info *, std::vector<worker_info *>,
+  std::priority_queue<worker_info*, std::vector<worker_info*>,
                       decltype(&worker_info_ptr_cmp)>
       worker_queue(worker_info_ptr_cmp);
   for (int wid = 0; wid < NUM_WORKER_THREADS; wid++)
     worker_queue.push(&worker_info_vec[wid]);
 
   uint8_t port = dpdk_port;
-  struct rte_mbuf *rx_bufs[RX_QUEUE_BURST_SIZE];
+  struct rte_mbuf* rx_bufs[RX_QUEUE_BURST_SIZE];
   uint16_t nb_rx, i, nb_return, total_return_size, return_size;
   uint16_t return_queue_checkin_idx = 0;
-  worker_info_t *tmp_w;
+  worker_info_t* tmp_w;
   int cur_version_number = 0;
   // int num_received_jobs = 0;
   int total_running_jobs = 0, packet_drop_count = 0;
@@ -1104,7 +1193,7 @@ static int run_server() {
   uint32_t dispatch_size, max_dispatch_size;
   uint64_t curr_size;
 #else
-  struct rte_mbuf *return_rx_bufs[FREE_MBUF_MAX_BATCH_SIZE];
+  struct rte_mbuf* return_rx_bufs[FREE_MBUF_MAX_BATCH_SIZE];
 #endif
 
 #ifdef SERVER_LAT
@@ -1118,13 +1207,12 @@ static int run_server() {
     /* receive packets */
     nb_rx = rte_eth_rx_burst(port, 0, rx_bufs, RX_QUEUE_BURST_SIZE);
 
-    if (nb_rx == 0)
-      continue;
+    if (nb_rx == 0) continue;
 
 #ifdef SERVER_LAT
     start_tsc = rdtsc();
     for (i = 0; i < nb_rx; i++) {
-      static_cast<struct rte_pktmbuf_pool_private_with_start_tsc *>(
+      static_cast<struct rte_pktmbuf_pool_private_with_start_tsc*>(
           rte_mbuf_to_priv(rx_bufs[i]))
           ->start_tsc = start_tsc;
     }
@@ -1136,8 +1224,8 @@ static int run_server() {
     for (i = 0; i < nb_rx; i += max_dispatch_size) {
 #ifdef RAND_DISP
 #ifdef POWER_TWO
-      worker_info_t *w1 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
-      worker_info_t *w2 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
+      worker_info_t* w1 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
+      worker_info_t* w2 = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
       tmp_w = (w1->num_running_jobs < w2->num_running_jobs) ? w1 : w2;
 #else
       tmp_w = &worker_info_vec[std::rand() % NUM_WORKER_THREADS];
@@ -1149,8 +1237,8 @@ static int run_server() {
       dispatch_size =
           (i + max_dispatch_size < nb_rx) ? max_dispatch_size : nb_rx - i;
       nb_return =
-          rte_ring_enqueue_burst(tmp_w->rx_mbuf_dispatch_q,
-                                 (void **)&rx_bufs[i], dispatch_size, nullptr);
+          rte_ring_enqueue_burst(tmp_w->rx_mbuf_dispatch_q, (void**)&rx_bufs[i],
+                                 dispatch_size, nullptr);
 
       if (unlikely(nb_return != dispatch_size)) {
         // drop all the packets onwards
@@ -1167,7 +1255,7 @@ static int run_server() {
         // total_running_jobs << std::endl;
         packet_drop_count++;
         if (packet_drop_count == 100000) {
-          //std::cout << "100K packet drops!" << std::endl;
+          // std::cout << "100K packet drops!" << std::endl;
           packet_drop_count = 0;
         }
         continue;
@@ -1220,14 +1308,13 @@ static int run_server() {
         return_size = 0;
         for (;;) {
           // drain the return queue
-          nb_return = rte_ring_dequeue_burst(
-              tmp_w->rx_mbuf_return_q,
-              (void **)&return_rx_bufs[total_return_size],
-              RETURN_RING_BURST_SIZE, nullptr);
+          nb_return =
+              rte_ring_dequeue_burst(tmp_w->rx_mbuf_return_q,
+                                     (void**)&return_rx_bufs[total_return_size],
+                                     RETURN_RING_BURST_SIZE, nullptr);
           total_return_size += nb_return;
           return_size += nb_return;
-          if (nb_return == 0)
-            break;
+          if (nb_return == 0) break;
         }
 #endif
         tmp_w->num_running_jobs -= return_size;
@@ -1247,22 +1334,22 @@ static int run_server() {
   return 0;
 }
 
-void rte_pktmbuf_customized_init(struct rte_mempool *mp,
-                                 __rte_unused void *opaque_arg, void *_m,
+void rte_pktmbuf_customized_init(struct rte_mempool* mp,
+                                 __rte_unused void* opaque_arg, void* _m,
                                  __rte_unused unsigned i) {
   rte_pktmbuf_init(mp, opaque_arg, _m, i);
-  struct rte_mbuf *tx_mbuf = static_cast<struct rte_mbuf *>(_m);
+  struct rte_mbuf* tx_mbuf = static_cast<struct rte_mbuf*>(_m);
   tx_mbuf->l2_len = RTE_ETHER_HDR_LEN;
   tx_mbuf->l3_len = sizeof(struct rte_ipv4_hdr);
   tx_mbuf->ol_flags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
 }
 
-struct rte_mempool *rte_pktmbuf_pool_create_w_customized_init(
-    const char *name, unsigned int n, unsigned int cache_size,
+struct rte_mempool* rte_pktmbuf_pool_create_w_customized_init(
+    const char* name, unsigned int n, unsigned int cache_size,
     uint16_t priv_size, uint16_t data_room_size, int socket_id) {
-  struct rte_mempool *mp;
+  struct rte_mempool* mp;
   struct rte_pktmbuf_pool_private mbp_priv;
-  const char *mp_ops_name = NULL;
+  const char* mp_ops_name = NULL;
   unsigned elt_size;
   int ret;
 
@@ -1280,11 +1367,9 @@ struct rte_mempool *rte_pktmbuf_pool_create_w_customized_init(
   mp = rte_mempool_create_empty(name, n, elt_size, cache_size,
                                 sizeof(struct rte_pktmbuf_pool_private),
                                 socket_id, 0);
-  if (mp == NULL)
-    return NULL;
+  if (mp == NULL) return NULL;
 
-  if (mp_ops_name == NULL)
-    mp_ops_name = rte_mbuf_best_mempool_ops();
+  if (mp_ops_name == NULL) mp_ops_name = rte_mbuf_best_mempool_ops();
 
   ret = rte_mempool_set_ops_byname(mp, mp_ops_name, NULL);
   if (ret != 0) {
@@ -1309,17 +1394,16 @@ struct rte_mempool *rte_pktmbuf_pool_create_w_customized_init(
 }
 
 /* the default always assumes MPMC */
-struct rte_mempool *
-rte_pktmbuf_pool_create_spsc(const char *name, unsigned int n,
-                             unsigned int cache_size, uint16_t priv_size,
-                             uint16_t data_room_size, int socket_id) {
-  struct rte_mempool *mp;
+struct rte_mempool* rte_pktmbuf_pool_create_spsc(
+    const char* name, unsigned int n, unsigned int cache_size,
+    uint16_t priv_size, uint16_t data_room_size, int socket_id) {
+  struct rte_mempool* mp;
 #ifdef SERVER_LAT
   struct rte_pktmbuf_pool_private_with_start_tsc mbp_priv;
 #else
   struct rte_pktmbuf_pool_private mbp_priv;
 #endif
-  const char *mp_ops_name = NULL;
+  const char* mp_ops_name = NULL;
   unsigned elt_size;
   int ret;
 
@@ -1348,11 +1432,9 @@ rte_pktmbuf_pool_create_spsc(const char *name, unsigned int n,
                                 socket_id,
                                 RTE_MEMPOOL_F_SP_PUT | RTE_MEMPOOL_F_SC_GET);
 #endif
-  if (mp == NULL)
-    return NULL;
+  if (mp == NULL) return NULL;
 
-  if (mp_ops_name == NULL)
-    mp_ops_name = rte_mbuf_best_mempool_ops();
+  if (mp_ops_name == NULL) mp_ops_name = rte_mbuf_best_mempool_ops();
 
   ret = rte_mempool_set_ops_byname(mp, mp_ops_name, NULL);
   if (ret != 0) {
@@ -1379,7 +1461,7 @@ rte_pktmbuf_pool_create_spsc(const char *name, unsigned int n,
 /*
  * Initialize dpdk.
  */
-static int dpdk_init(int argc, char *argv[]) {
+static int dpdk_init(int argc, char* argv[]) {
   int args_parsed;
 
   /* Initialize the Environment Abstraction Layer (EAL). */
@@ -1410,7 +1492,7 @@ static int dpdk_init(int argc, char *argv[]) {
   return args_parsed;
 }
 
-static int parse_args(int argc, char *argv[]) {
+static int parse_args(int argc, char* argv[]) {
   long tmp;
   int next_arg;
 
@@ -1435,7 +1517,7 @@ static void sanity_check() {
  * The main function, which does initialization and starts the client or server.
  */
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   sanity_check();
 
   int args_parsed, res;
@@ -1453,8 +1535,7 @@ int main(int argc, char *argv[]) {
   argc -= args_parsed;
   argv += args_parsed;
   res = parse_args(argc, argv);
-  if (res < 0)
-    return 0;
+  if (res < 0) return 0;
 
   /* set thread id */
   cp_pid = gettid();
@@ -1463,8 +1544,16 @@ int main(int argc, char *argv[]) {
   if (port_init(dpdk_port, rx_mbuf_pool, num_rx_queues, num_tx_queues) != 0)
     rte_exit(EXIT_FAILURE, "Cannot init port %d\n", dpdk_port);
 
+#ifdef LEVELDB
+  leveldb_init ();
+#endif
+
   // rocksdb_init();
   run_server();
+
+#ifdef LEVELDB
+  leveldb_close ( db );
+#endif
 
   return 0;
 }
