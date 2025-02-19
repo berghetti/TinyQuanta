@@ -4,15 +4,16 @@ LLVM_CXX = clang++-12
 ifeq ($(DEBUG),y)
 CFLAGS += -D__DEBUG__ -O0 -g -ggdb
 else
+	
 QUANTUM_CYCLE ?= 5200
-NUM_WORKER_COROS ?= 8
+NUM_WORKER_COROS ?= 14
 CFLAGS += -O3 -g -DQUANTUM_CYCLE=${QUANTUM_CYCLE} -DNUM_WORKER_COROS=${NUM_WORKER_COROS} -DBASE_CPU=28 -DNEW_DISPATCHER -DMSQ -DSYNTHETIC -DNDEBUG #-DSERVER_LAT #-DQUEUE_SIZE #-DSERVER_LAT #-DRECORD_NUM_PRE #-DTIME_STAGE
 endif
 
 PKGCONF ?= pkg-config
 
-# overwrite the dpdk installed in /opt/mellanox/dpdk/ 
-#PKG_CONFIG_PATH = /usr/local/lib/x86_64-linux-gnu/pkgconfig 
+# overwrite the dpdk installed in /opt/mellanox/dpdk/
+#PKG_CONFIG_PATH = /usr/local/lib/x86_64-linux-gnu/pkgconfig
 PKG_CONFIG_PATH = ../afp/deps/dpdk/build/lib/x86_64-linux-gnu/pkgconfig
 
 PC_FILE := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --path libdpdk 2>/dev/null)
@@ -22,11 +23,21 @@ LDFLAGS_SHARED = $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKGCONF) --libs --
 
 CFLAGS += -DALLOW_EXPERIMENTAL_API -lm -lstdc++
 
-# for boost 
-CFLAGS += -I /usr/include 
+# for boost
+CFLAGS += -I /usr/include
 BOOST_LDFLAGS += -lboost_coroutine -lboost_context
 
 TQ_ROOT = .
+
+#for LevelDB
+CFLAGS += -I./leveldb/include
+LEVELDB_LIB = ./leveldb/libleveldb_tq.a
+LEVELDB_FLAGS += -pthread -lsnappy
+
+ENABLE_LEVELDB=y
+ifeq ($(ENABLE_LEVELDB),y)
+CFLAGS += -DLEVELDB
+endif
 
 # for RocksDB
 #CFLAGS += -I $(TQ_ROOT)/RocksDB-TQ/include
@@ -48,10 +59,11 @@ CFLAGS += -I$(FAKE_WORK_LIB_HOME)
 
 #OPT = -O2 -fno-omit-frame-pointer -momit-leaf-frame-pointer
 
-all: tq_server create_db profile_rocksdb_get profile_rocksdb_scan
+#all: tq_server create_db profile_rocksdb_get profile_rocksdb_scan
+all: tq_server
 
 tq_server: tq_server.cpp Makefile $(PC_FILE)
-	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB) $(FAKE_WORK_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
+	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB) $(LEVELDB_LIB) $(FAKE_WORK_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(LEVELDB_FLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
 
 tq_server_ci: tq_server.cpp Makefile $(PC_FILE)
 	$(LLVM_CXX) $< -flto $(ROCKSDB_LIB_CI) $(FAKE_WORK_LIB) -o $@ $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED) $(ROCKSDB_LDFLAGS) $(CP_LDFLAGS) $(BOOST_LDFLAGS)
