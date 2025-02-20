@@ -33,6 +33,8 @@
 
 static leveldb_t *db;
 
+static volatile int quit = 0;
+
 static void
 leveldb_init ( void )
 {
@@ -559,7 +561,7 @@ void coro(int coro_id, job_info_t*& jinfo, coro_t::push_type& yield) {
     {
       case GET:
         do_get((char *) &(jinfo->key));
-          break;
+        break;
       case SCAN:
         do_scan();
         break;
@@ -870,7 +872,7 @@ void* worker(void* arg) {
     idle_coros.push_back(&worker_coro_infos[coro_id]);
   }
 
-  for (;;) {
+  while (!quit) {
 #ifdef TIME_STAGE
     start = rdtsc_w_lfence();
 #endif
@@ -1063,6 +1065,7 @@ void* worker(void* arg) {
     total_num_quanta / finished_jobs << std::endl;
     }*/
   }
+    return NULL;
 }
 
 static size_t round_to_huge_page_size(size_t n) {
@@ -1099,7 +1102,8 @@ static void signal_callback_handler(int signum) {
   std::cout << "Number of preemptions per core: "
             << total_num_pre / NUM_WORKER_THREADS << std::endl;
   // Terminate program
-  std::exit(signum);
+  //std::exit(signum);
+  quit = 1;
 }
 #endif
 
@@ -1201,7 +1205,7 @@ static int run_server() {
 #endif
 
   /* Run until the application is quit or killed. */
-  for (;;) {
+  while (!quit) {
     /* if there were packets buffered, handle them first before starting to
      * receive again */
     /* receive packets */
