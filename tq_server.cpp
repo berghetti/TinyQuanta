@@ -28,12 +28,13 @@
 #include <csignal>
 #endif
 
+static volatile int quit = 0;
+
 #ifdef LEVELDB
 #include <leveldb/c.h>
 
 static leveldb_t *db;
 
-static volatile int quit = 0;
 
 static void
 leveldb_init ( void )
