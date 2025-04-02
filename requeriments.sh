@@ -18,4 +18,4 @@ if [[ $VERSION -ge 18 ]]; then
 
 fi
 
-sudo apt install libboost-coroutine-dev -y
+sudo apt install libboost-coroutine-dev clang-format -y

@@ -30,11 +30,11 @@ BOOST_LDFLAGS += -lboost_coroutine -lboost_context
 TQ_ROOT = .
 
 #for LevelDB
-CFLAGS += -I./leveldb/include
-LEVELDB_LIB = ./leveldb/libleveldb_tq.a
-LEVELDB_FLAGS += -pthread -lsnappy
+#CFLAGS += -I./leveldb/include
+#LEVELDB_LIB = ./leveldb/libleveldb_tq.a
+#LEVELDB_FLAGS += -pthread -lsnappy
 
-ENABLE_LEVELDB=y
+ENABLE_LEVELDB=n
 ifeq ($(ENABLE_LEVELDB),y)
 CFLAGS += -DLEVELDB
 endif
